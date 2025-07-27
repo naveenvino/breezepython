@@ -1,0 +1,261 @@
+"""
+Weekly Context Manager
+Manages weekly zones, bias calculation, and context for signal evaluation
+"""
+import logging
+from datetime import datetime, timedelta
+from typing import List, Optional, Tuple
+import pandas as pd
+import pytz
+
+from ..value_objects.signal_types import (
+    WeeklyZones, WeeklyBias, WeeklyContext, BarData, TradeDirection
+)
+from ...infrastructure.database.models import NiftyIndexData
+from ...utils.timezone_utils import (
+    utc_to_ist, ist_to_utc, get_market_open_utc, 
+    is_market_hours_utc, format_ist_time
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+class WeeklyContextManager:
+    """Manages weekly context for signal evaluation"""
+    
+    def __init__(self):
+        self.current_context: Optional[WeeklyContext] = None
+        self.current_week_start: Optional[datetime] = None
+    
+    def get_week_start(self, date: datetime) -> datetime:
+        """Get Monday 9:15 AM IST for the week containing the date"""
+        # Monday is 0, Sunday is 6
+        days_since_monday = date.weekday()
+        monday = date - timedelta(days=days_since_monday)
+        
+        # Return Monday 9:15 AM IST
+        return monday.replace(hour=9, minute=15, second=0, microsecond=0)
+    
+    def is_new_week(self, timestamp: datetime) -> bool:
+        """Check if timestamp is in a new week"""
+        week_start = self.get_week_start(timestamp)
+        return self.current_week_start != week_start
+    
+    def calculate_weekly_zones(self, prev_week_data: List[NiftyIndexData]) -> WeeklyZones:
+        """
+        Calculate support and resistance zones from previous week data
+        
+        Args:
+            prev_week_data: Previous week's hourly data
+            
+        Returns:
+            WeeklyZones object
+        """
+        if not prev_week_data:
+            raise ValueError("No previous week data available")
+        
+        # Convert to pandas for easier calculation
+        df = pd.DataFrame([{
+            'timestamp': d.timestamp,
+            'open': float(d.open),
+            'high': float(d.high),
+            'low': float(d.low),
+            'close': float(d.close)
+        } for d in prev_week_data])
+        
+        # Previous week high/low/close
+        prev_week_high = df['high'].max()
+        prev_week_low = df['low'].min()
+        prev_week_close = df['close'].iloc[-1]
+        
+        # Calculate 4-hour body extremes
+        # Group by 4-hour periods
+        df['hour'] = df['timestamp'].dt.hour
+        df['date'] = df['timestamp'].dt.date
+        
+        # Calculate body top and bottom
+        df['body_top'] = df[['open', 'close']].max(axis=1)
+        df['body_bottom'] = df[['open', 'close']].min(axis=1)
+        
+        # Get max/min body levels
+        prev_max_4h_body = df['body_top'].max()
+        prev_min_4h_body = df['body_bottom'].min()
+        
+        # Calculate zones
+        zones = WeeklyZones(
+            upper_zone_top=max(prev_week_high, prev_max_4h_body),
+            upper_zone_bottom=min(prev_week_high, prev_max_4h_body),
+            lower_zone_top=max(prev_week_low, prev_min_4h_body),
+            lower_zone_bottom=min(prev_week_low, prev_min_4h_body),
+            prev_week_high=prev_week_high,
+            prev_week_low=prev_week_low,
+            prev_week_close=prev_week_close,
+            prev_max_4h_body=prev_max_4h_body,
+            prev_min_4h_body=prev_min_4h_body,
+            calculation_time=datetime.now()
+        )
+        
+        logger.info(f"Calculated weekly zones - Upper: {zones.upper_zone_bottom}-{zones.upper_zone_top}, "
+                   f"Lower: {zones.lower_zone_bottom}-{zones.lower_zone_top}")
+        
+        return zones
+    
+    def calculate_weekly_bias(self, zones: WeeklyZones, current_price: float) -> WeeklyBias:
+        """
+        Calculate weekly market bias based on zones and current price
+        
+        Args:
+            zones: Weekly support/resistance zones
+            current_price: Current market price
+            
+        Returns:
+            WeeklyBias object
+        """
+        # Calculate distances
+        distance_to_resistance = (zones.upper_zone_bottom - current_price) / current_price
+        distance_to_support = (current_price - zones.lower_zone_top) / current_price
+        
+        # Determine bias based on previous week close position
+        if zones.prev_week_close > zones.upper_zone_bottom:
+            # Closed above resistance - Bullish
+            bias = TradeDirection.BULLISH
+            strength = min(1.0, distance_to_resistance * 100)
+            description = "Bullish - Above resistance"
+        elif zones.prev_week_close < zones.lower_zone_top:
+            # Closed below support - Bearish
+            bias = TradeDirection.BEARISH
+            strength = min(1.0, distance_to_support * 100)
+            description = "Bearish - Below support"
+        else:
+            # In between zones - check which is closer
+            if abs(distance_to_resistance) < abs(distance_to_support):
+                bias = TradeDirection.BEARISH
+                strength = 0.5
+                description = "Bearish - Near resistance"
+            else:
+                bias = TradeDirection.BULLISH
+                strength = 0.5
+                description = "Bullish - Near support"
+        
+        weekly_bias = WeeklyBias(
+            bias=bias,
+            distance_to_resistance=distance_to_resistance,
+            distance_to_support=distance_to_support,
+            strength=strength,
+            description=description
+        )
+        
+        logger.info(f"Calculated weekly bias: {description} (strength: {strength:.2f})")
+        
+        return weekly_bias
+    
+    def update_context(self, current_bar: BarData, prev_week_data: List[NiftyIndexData]) -> WeeklyContext:
+        """
+        Update weekly context with new bar
+        
+        Args:
+            current_bar: Current hourly bar
+            prev_week_data: Previous week's data for zone calculation
+            
+        Returns:
+            Updated WeeklyContext
+        """
+        # Check if new week
+        if self.is_new_week(current_bar.timestamp) or self.current_context is None:
+            # Calculate new zones and bias
+            zones = self.calculate_weekly_zones(prev_week_data)
+            bias = self.calculate_weekly_bias(zones, current_bar.close)
+            
+            # Create new context or reset existing
+            if self.current_context is None:
+                self.current_context = WeeklyContext(zones=zones, bias=bias)
+            else:
+                self.current_context.reset_for_new_week(zones, bias)
+            
+            self.current_week_start = self.get_week_start(current_bar.timestamp)
+            logger.info(f"Started new week context at {self.current_week_start}")
+        
+        # Update context with current bar
+        self.current_context.update_weekly_stats(current_bar)
+        
+        # Set first hour bar if not set
+        if self.current_context.first_hour_bar is None:
+            # Check if this is the first bar of the week (Monday 9:15-10:15 IST)
+            # Now timestamps are already in IST
+            if (current_bar.timestamp.weekday() == 0 and  # Monday
+                current_bar.timestamp.hour == 9):  # 9:XX AM hour
+                # This is the first hour of Monday (9:15-10:15 AM IST)
+                self.current_context.first_hour_bar = current_bar
+                logger.info(f"Set first hour bar: {current_bar} at {current_bar.timestamp}")
+        
+        return self.current_context
+    
+    def get_previous_week_data(
+        self, 
+        current_date: datetime,
+        nifty_data: List[NiftyIndexData]
+    ) -> List[NiftyIndexData]:
+        """
+        Get previous week's data from the dataset
+        
+        Args:
+            current_date: Current date
+            nifty_data: Full dataset of NIFTY data
+            
+        Returns:
+            List of previous week's data
+        """
+        # Get current week start
+        current_week_start = self.get_week_start(current_date)
+        
+        # Previous week is 7 days before
+        prev_week_start = current_week_start - timedelta(days=7)
+        prev_week_end = current_week_start - timedelta(seconds=1)
+        
+        # Filter data for previous week
+        prev_week_data = [
+            d for d in nifty_data
+            if prev_week_start <= d.timestamp <= prev_week_end
+        ]
+        
+        return prev_week_data
+    
+    def create_bar_from_nifty_data(self, data: NiftyIndexData) -> BarData:
+        """Convert NiftyIndexData to BarData"""
+        return BarData(
+            timestamp=data.timestamp,
+            open=float(data.open),
+            high=float(data.high),
+            low=float(data.low),
+            close=float(data.close),
+            volume=data.volume
+        )
+    
+    def is_market_hours(self, timestamp: datetime) -> bool:
+        """Check if timestamp is during market hours (IST)"""
+        # Market hours: Monday-Friday, 9:15 AM - 3:30 PM IST
+        if timestamp.weekday() >= 5:  # Saturday or Sunday
+            return False
+        
+        time = timestamp.time()
+        market_open = datetime.strptime("09:15", "%H:%M").time()
+        market_close = datetime.strptime("15:30", "%H:%M").time()
+        
+        return market_open <= time <= market_close
+    
+    def get_next_expiry(self, date: datetime) -> datetime:
+        """Get next Thursday expiry from given date"""
+        # NIFTY weekly expiry is on Thursday
+        days_ahead = 3 - date.weekday()  # Thursday is 3
+        if days_ahead <= 0:  # Target day already happened this week
+            days_ahead += 7
+        
+        expiry = date + timedelta(days=days_ahead)
+        return expiry.replace(hour=15, minute=30, second=0, microsecond=0)
+    
+    def get_expiry_for_week(self, week_start: datetime) -> datetime:
+        """Get expiry date for a given week (Thursday 3:30 PM)"""
+        # Week starts on Monday, expiry is on Thursday
+        expiry = week_start + timedelta(days=3)  # Monday + 3 = Thursday
+        return expiry.replace(hour=15, minute=30, second=0, microsecond=0)
