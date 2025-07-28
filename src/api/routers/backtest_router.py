@@ -152,9 +152,11 @@ async def run_backtest(
     Returns the backtest ID to track progress and get results
     """
     try:
-        # Convert dates to datetime
-        from_date = datetime.combine(request.from_date, datetime.min.time())
-        to_date = datetime.combine(request.to_date, datetime.max.time())
+        # Convert dates to datetime with market hours
+        # Start at 9:15 AM IST (market open)
+        from_date = datetime.combine(request.from_date, datetime.strptime("09:15", "%H:%M").time())
+        # End at 3:30 PM IST (market close)
+        to_date = datetime.combine(request.to_date, datetime.strptime("15:30", "%H:%M").time())
         
         # Create backtest parameters
         params = BacktestParameters(
@@ -171,6 +173,12 @@ async def run_backtest(
         
         # Run backtest asynchronously
         backtest_id = await backtest_service.execute(params)
+        
+        # DEBUG: Check result immediately
+        db_manager = get_db_manager()
+        with db_manager.get_session() as session:
+            run = session.query(BacktestRun).filter_by(id=backtest_id).first()
+            logger.info(f"[DEBUG] Backtest {backtest_id} completed with {run.total_trades} trades")
         
         return {
             "success": True,

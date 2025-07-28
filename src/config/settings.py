@@ -81,7 +81,7 @@ class TradingSettings(BaseSettings):
     max_positions: int = Field(default=5, env="MAX_POSITIONS")
     max_daily_loss: float = Field(default=10000, env="MAX_DAILY_LOSS")
     risk_per_trade: float = Field(default=2.0, env="RISK_PER_TRADE")
-    default_lot_size: int = Field(default=50, env="DEFAULT_LOT_SIZE")
+    default_lot_size: int = Field(default=75, env="DEFAULT_LOT_SIZE")
     
     class Config:
         env_file = ".env"

@@ -4,7 +4,6 @@ Manages service dependencies and lifecycle
 """
 import logging
 from typing import Dict, Any, Type, TypeVar, Optional, Callable
-from functools import lru_cache
 
 from ...domain.repositories.imarket_data_repository import IMarketDataRepository
 from ...domain.repositories.ioptions_repository import IOptionsRepository, IOptionsHistoricalDataRepository
@@ -63,15 +62,16 @@ class ServiceContainer:
         
         # Register new services
         self.register_singleton(BreezeService, BreezeService)
-        self.register_singleton(DataCollectionService, lambda: DataCollectionService(
+        # Changed to factory to avoid caching issues
+        self.register_factory(DataCollectionService, lambda: DataCollectionService(
             breeze_service=self.resolve(BreezeService),
             db_manager=None  # Will use get_db_manager() internally
         ))
-        self.register_singleton(OptionPricingService, lambda: OptionPricingService(
+        self.register_factory(OptionPricingService, lambda: OptionPricingService(
             data_collection_service=self.resolve(DataCollectionService),
             db_manager=None  # Will use get_db_manager() internally
         ))
-        self.register_singleton("DataCollectionService", lambda: self.resolve(DataCollectionService))
+        self.register_factory("DataCollectionService", lambda: self.resolve(DataCollectionService))
         
         # Register use cases as transient
         self.register_factory(CollectWeeklyDataUseCase, self._create_collect_weekly_data_use_case)
@@ -99,7 +99,10 @@ class ServiceContainer:
     def register_factory(self, service_type: Type[T], factory: Callable[[], T]) -> None:
         """Register a factory function for a service"""
         self._factories[service_type] = factory
-        logger.debug(f"Registered factory for {service_type.__name__}")
+        if hasattr(service_type, '__name__'):
+            logger.debug(f"Registered factory for {service_type.__name__}")
+        else:
+            logger.debug(f"Registered factory for {service_type}")
     
     def resolve(self, service_type) -> Any:
         """Resolve a service instance"""
@@ -229,9 +232,8 @@ def get_container() -> ServiceContainer:
     return _container
 
 
-@lru_cache(maxsize=None)
 def get_service(service_type: Type[T]) -> T:
-    """Get a service from the container (cached)"""
+    """Get a service from the container"""
     container = get_container()
     return container.resolve(service_type)
 

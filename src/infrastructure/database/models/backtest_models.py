@@ -44,12 +44,13 @@ class BacktestRun(Base):
     from_date = Column('FromDate', DateTime, nullable=False)
     to_date = Column('ToDate', DateTime, nullable=False)
     initial_capital = Column('InitialCapital', DECIMAL(18, 2), nullable=False)
-    lot_size = Column('LotSize', Integer, nullable=False, default=50)
+    lot_size = Column('LotSize', Integer, nullable=False, default=75)
+    lots_to_trade = Column('LotsToTrade', Integer, nullable=False, default=10)
     
     # Configuration
     signals_to_test = Column('SignalsToTest', String(100), nullable=False)  # JSON array
     use_hedging = Column('UseHedging', Boolean, nullable=False, default=True)
-    hedge_offset = Column('HedgeOffset', Integer, nullable=False, default=500)
+    hedge_offset = Column('HedgeOffset', Integer, nullable=False, default=200)
     commission_per_lot = Column('CommissionPerLot', DECIMAL(10, 2), nullable=False, default=40)
     slippage_percent = Column('SlippagePercent', DECIMAL(5, 4), nullable=False, default=0.001)
     

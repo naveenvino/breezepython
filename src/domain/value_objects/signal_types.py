@@ -49,9 +49,9 @@ class WeeklyZones:
     lower_zone_top: float      # max(prevWeekLow, prevMin4hBody)
     lower_zone_bottom: float   # min(prevWeekLow, prevMin4hBody)
     
-    # Margins for proximity checks
-    margin_high: float = 0.0025  # 0.25%
-    margin_low: float = 0.0025   # 0.25%
+    # Margins for proximity checks (calculated dynamically)
+    margin_high: float = 0.0
+    margin_low: float = 0.0
     
     # Week data used for calculation
     prev_week_high: float = 0
@@ -63,13 +63,26 @@ class WeeklyZones:
     # Timestamp when zones were calculated
     calculation_time: Optional[datetime] = None
     
+    def __post_init__(self):
+        """Calculate margins after initialization"""
+        # According to API guide:
+        # marginHigh = max((upperZTop - upperZBottom) * 3, minTick * 5)
+        # marginLow = max((lowerZTop - lowerZBottom) * 3, minTick * 5)
+        min_tick = 0.05  # NIFTY minimum tick size
+        
+        upper_zone_range = self.upper_zone_top - self.upper_zone_bottom
+        lower_zone_range = self.lower_zone_top - self.lower_zone_bottom
+        
+        self.margin_high = max(upper_zone_range * 3, min_tick * 5)
+        self.margin_low = max(lower_zone_range * 3, min_tick * 5)
+    
     def is_near_upper_zone(self, price: float) -> bool:
         """Check if price is near upper zone"""
-        return abs(price - self.upper_zone_bottom) / price <= self.margin_high
+        return abs(price - self.upper_zone_bottom) <= self.margin_high
     
     def is_near_lower_zone(self, price: float) -> bool:
         """Check if price is near lower zone"""
-        return abs(price - self.lower_zone_bottom) / price <= self.margin_low
+        return abs(price - self.lower_zone_bottom) <= self.margin_low
 
 
 @dataclass
@@ -229,7 +242,9 @@ class SignalResult:
             is_triggered=True,
             signal_type=signal_type,
             option_type=signal_type.option_type,
-            strike_price=round(stop_loss / 50) * 50,  # Round to nearest 50
+            # Round to nearest 50 with directional bias
+            # Bullish (PE): round down, Bearish (CE): round up
+            strike_price=(int(stop_loss / 50) * 50) if signal_type.is_bullish else (int((stop_loss + 49) / 50) * 50),
             stop_loss=stop_loss,
             direction=TradeDirection.BULLISH if signal_type.is_bullish else TradeDirection.BEARISH,
             entry_time=entry_time,

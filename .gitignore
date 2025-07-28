@@ -53,3 +53,6 @@ wheels/
 
 # Claude agents
 .claude/agents/
+
+# Archive folders
+archive/

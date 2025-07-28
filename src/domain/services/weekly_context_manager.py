@@ -70,17 +70,41 @@ class WeeklyContextManager:
         prev_week_close = df['close'].iloc[-1]
         
         # Calculate 4-hour body extremes
-        # Group by 4-hour periods
-        df['hour'] = df['timestamp'].dt.hour
+        # Since we have hourly data from 5-min aggregation, 
+        # we need to group into 4-hour blocks
+        
+        # Create 4-hour groups (0-3, 4-7, 8-11, 12-15, 16-19, 20-23)
+        df['4h_group'] = (df['timestamp'].dt.hour // 4) * 4
         df['date'] = df['timestamp'].dt.date
+        df['4h_key'] = df['date'].astype(str) + '_' + df['4h_group'].astype(str)
         
-        # Calculate body top and bottom
-        df['body_top'] = df[['open', 'close']].max(axis=1)
-        df['body_bottom'] = df[['open', 'close']].min(axis=1)
+        # For each 4-hour group, find the body extremes
+        four_hour_bodies = []
+        for group_key, group_df in df.groupby('4h_key'):
+            if len(group_df) > 0:
+                # Get OHLC for this 4-hour period
+                group_open = group_df.iloc[0]['open']
+                group_close = group_df.iloc[-1]['close']
+                
+                # Body top and bottom for this 4-hour candle
+                body_top = max(group_open, group_close)
+                body_bottom = min(group_open, group_close)
+                
+                four_hour_bodies.append({
+                    'body_top': body_top,
+                    'body_bottom': body_bottom
+                })
         
-        # Get max/min body levels
-        prev_max_4h_body = df['body_top'].max()
-        prev_min_4h_body = df['body_bottom'].min()
+        # Get max/min body levels across all 4-hour candles
+        if four_hour_bodies:
+            prev_max_4h_body = max(b['body_top'] for b in four_hour_bodies)
+            prev_min_4h_body = min(b['body_bottom'] for b in four_hour_bodies)
+        else:
+            # Fallback to hourly data if grouping fails
+            df['body_top'] = df[['open', 'close']].max(axis=1)
+            df['body_bottom'] = df[['open', 'close']].min(axis=1)
+            prev_max_4h_body = df['body_top'].max()
+            prev_min_4h_body = df['body_bottom'].min()
         
         # Calculate zones
         zones = WeeklyZones(
@@ -96,8 +120,8 @@ class WeeklyContextManager:
             calculation_time=datetime.now()
         )
         
-        logger.info(f"Calculated weekly zones - Upper: {zones.upper_zone_bottom}-{zones.upper_zone_top}, "
-                   f"Lower: {zones.lower_zone_bottom}-{zones.lower_zone_top}")
+        logger.info(f"Calculated weekly zones - Upper: {zones.upper_zone_bottom:.2f}-{zones.upper_zone_top:.2f}, "
+                   f"Lower: {zones.lower_zone_bottom:.2f}-{zones.lower_zone_top:.2f}")
         
         return zones
     
@@ -112,31 +136,27 @@ class WeeklyContextManager:
         Returns:
             WeeklyBias object
         """
-        # Calculate distances
-        distance_to_resistance = (zones.upper_zone_bottom - current_price) / current_price
-        distance_to_support = (current_price - zones.lower_zone_top) / current_price
+        # Calculate distances according to signal logic
+        # Distance from previous week close to 4H bodies
+        distance_to_resistance = abs(zones.prev_week_close - zones.prev_max_4h_body)
+        distance_to_support = abs(zones.prev_week_close - zones.prev_min_4h_body)
         
-        # Determine bias based on previous week close position
-        if zones.prev_week_close > zones.upper_zone_bottom:
-            # Closed above resistance - Bullish
+        # Determine bias based on which is closer
+        if distance_to_support < distance_to_resistance:
+            # Closer to support - BULLISH
             bias = TradeDirection.BULLISH
-            strength = min(1.0, distance_to_resistance * 100)
-            description = "Bullish - Above resistance"
-        elif zones.prev_week_close < zones.lower_zone_top:
-            # Closed below support - Bearish
+            strength = 1.0
+            description = "Bullish - Closer to support"
+        elif distance_to_resistance < distance_to_support:
+            # Closer to resistance - BEARISH
             bias = TradeDirection.BEARISH
-            strength = min(1.0, distance_to_support * 100)
-            description = "Bearish - Below support"
+            strength = 1.0
+            description = "Bearish - Closer to resistance"
         else:
-            # In between zones - check which is closer
-            if abs(distance_to_resistance) < abs(distance_to_support):
-                bias = TradeDirection.BEARISH
-                strength = 0.5
-                description = "Bearish - Near resistance"
-            else:
-                bias = TradeDirection.BULLISH
-                strength = 0.5
-                description = "Bullish - Near support"
+            # Equal distance - NEUTRAL
+            bias = TradeDirection.NEUTRAL
+            strength = 0.0
+            description = "Neutral - Equal distance"
         
         weekly_bias = WeeklyBias(
             bias=bias,
@@ -146,7 +166,7 @@ class WeeklyContextManager:
             description=description
         )
         
-        logger.info(f"Calculated weekly bias: {description} (strength: {strength:.2f})")
+        logger.info(f"Calculated weekly bias: {description} (dist to resistance: {distance_to_resistance:.2f}, dist to support: {distance_to_support:.2f})")
         
         return weekly_bias
     
@@ -211,7 +231,10 @@ class WeeklyContextManager:
         
         # Previous week is 7 days before
         prev_week_start = current_week_start - timedelta(days=7)
-        prev_week_end = current_week_start - timedelta(seconds=1)
+        # Previous week ends on Friday 15:30 (not Sunday night)
+        # So we need to find Friday of previous week
+        friday = prev_week_start + timedelta(days=4)  # Monday + 4 = Friday
+        prev_week_end = friday.replace(hour=15, minute=30, second=0)
         
         # Filter data for previous week
         prev_week_data = [

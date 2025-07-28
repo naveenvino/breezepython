@@ -14,7 +14,8 @@ from ..infrastructure.di.container import get_container, get_service
 from ..infrastructure.database import get_db_manager
 
 # Import routers
-from .routers import backtest_router, signals_router
+from .routers import backtest_router, signals_router, test_router
+from .routers.working_backtest_router import router as working_backtest_router
 
 # Configure logging
 logging.basicConfig(
@@ -77,6 +78,8 @@ app.add_middleware(
 # Removed unused routers - only backtest and signals are used
 app.include_router(backtest_router.router, prefix="/api/v2/backtest", tags=["Backtesting"])
 app.include_router(signals_router.router, tags=["Signal Testing"])
+app.include_router(test_router.router, prefix="/api/v2/test", tags=["Testing"])
+app.include_router(working_backtest_router, prefix="/api/v2/working", tags=["Working Backtest"])
 
 
 # Root endpoint

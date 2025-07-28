@@ -74,6 +74,11 @@ class SignalEvaluator:
             return SignalResult.no_signal()
         
         zones = context.zones
+        bias = context.bias
+        
+        # S1 requires bullish bias
+        if bias.bias != TradeDirection.BULLISH:
+            return SignalResult.no_signal()
         
         # Conditions
         cond1 = first_bar.open >= zones.lower_zone_bottom  # Opened above/on support
@@ -85,8 +90,8 @@ class SignalEvaluator:
             logger.info(f"  First bar: O={first_bar.open} C={first_bar.close} (below support {zones.lower_zone_bottom})")
             logger.info(f"  Second bar: C={current_bar.close} (recovered above first bar low {first_bar.low})")
             
-            # Calculate stop loss
-            stop_loss = first_bar.low - first_bar.body_range
+            # Calculate stop loss - 5 points below first bar low
+            stop_loss = first_bar.low - 5
             
             return SignalResult.from_signal(
                 signal_type=SignalType.S1,

@@ -30,10 +30,12 @@ class BacktestParameters:
         from_date: datetime,
         to_date: datetime,
         initial_capital: float = 500000,
-        lot_size: int = 50,
+        lot_size: int = 75,  # Changed to 75 as per requirement
+        lots_to_trade: int = 10,  # Default 10 lots = 750 quantity
+        lots_per_signal: Dict[str, int] = None,  # Custom lots per signal
         signals_to_test: List[str] = None,
         use_hedging: bool = True,
-        hedge_offset: int = 500,
+        hedge_offset: int = 200,
         commission_per_lot: float = 40,
         slippage_percent: float = 0.001
     ):
@@ -41,6 +43,8 @@ class BacktestParameters:
         self.to_date = to_date
         self.initial_capital = initial_capital
         self.lot_size = lot_size
+        self.lots_to_trade = lots_to_trade
+        self.lots_per_signal = lots_per_signal or {}  # e.g., {"S1": 10, "S2": 5, ...}
         self.signals_to_test = signals_to_test or ["S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8"]
         self.use_hedging = use_hedging
         self.hedge_offset = hedge_offset
@@ -86,9 +90,10 @@ class RunBacktestUseCase:
             # Ensure data is available
             await self._ensure_data_available(params.from_date, params.to_date)
             
-            # Get NIFTY data for the period
+            # Get NIFTY data for the period (including buffer for previous week)
+            buffer_start = params.from_date - timedelta(days=7)
             nifty_data = await self.data_collection.get_nifty_data(
-                params.from_date, params.to_date
+                buffer_start, params.to_date
             )
             
             if not nifty_data:
@@ -123,6 +128,7 @@ class RunBacktestUseCase:
             to_date=params.to_date,
             initial_capital=Decimal(str(params.initial_capital)),
             lot_size=params.lot_size,
+            lots_to_trade=params.lots_to_trade,
             signals_to_test=",".join(params.signals_to_test),
             use_hedging=params.use_hedging,
             hedge_offset=params.hedge_offset,
@@ -143,9 +149,9 @@ class RunBacktestUseCase:
         # Add buffer for previous week data needed for zone calculation
         buffer_start = from_date - timedelta(days=7)
         
-        # Ensure NIFTY data
+        # Ensure NIFTY data - don't fetch from API during backtesting
         added = await self.data_collection.ensure_nifty_data_available(
-            buffer_start, to_date
+            buffer_start, to_date, fetch_missing=False
         )
         
         if added > 0:
@@ -154,16 +160,28 @@ class RunBacktestUseCase:
         # Get all potential expiry dates in the period
         expiry_dates = self._get_expiry_dates(from_date, to_date)
         
-        # Get required strikes (we'll fetch a range around ATM)
-        # This is simplified - in production, you'd determine strikes dynamically
-        strikes = list(range(15000, 30000, 50))  # Adjust based on NIFTY levels
+        # Get required strikes (only fetch around current NIFTY level)
+        # Get current NIFTY level from recent data
+        current_nifty = 25000  # Default fallback
+        with self.db_manager.get_session() as session:
+            recent_data = session.query(NiftyIndexData).filter(
+                NiftyIndexData.timestamp <= to_date
+            ).order_by(NiftyIndexData.timestamp.desc()).first()
+            if recent_data:
+                current_nifty = int(recent_data.close)
+        
+        # Only fetch strikes within reasonable range (±1000 points from current level)
+        # This covers main positions and hedges
+        min_strike = ((current_nifty - 1000) // 50) * 50
+        max_strike = ((current_nifty + 1000) // 50) * 50
+        strikes = list(range(min_strike, max_strike + 50, 50))
         
         # Ensure options data for all expiries
         for expiry in expiry_dates:
             # Only fetch data up to expiry date
             end_date = min(expiry, to_date)
             added = await self.data_collection.ensure_options_data_available(
-                from_date, end_date, strikes, [expiry]
+                from_date, end_date, strikes, [expiry], fetch_missing=False
             )
             
             if added > 0:
@@ -230,7 +248,8 @@ class RunBacktestUseCase:
                 daily_starting_capital = current_capital
             
             # Get previous week data for context
-            if i < 7 * 6:  # Need at least a week of data
+            # We need at least previous week's data (5 days * 7 hours = 35 bars)
+            if i < 35:  # Changed from 7*6=42 to 35
                 continue
             
             prev_week_data = self.context_manager.get_previous_week_data(
@@ -242,6 +261,14 @@ class RunBacktestUseCase:
             
             # Update weekly context
             context = self.context_manager.update_context(current_bar, prev_week_data)
+            
+            # Debug logging for first few bars of Monday
+            if current_bar.timestamp.date() == datetime(2025, 7, 14).date() and i < 40:
+                logger.info(f"DEBUG Bar {i}: {current_bar.timestamp}, Open: {current_bar.open}, Close: {current_bar.close}")
+                if context.zones:
+                    logger.info(f"  Zones - Support: {context.zones.lower_zone_bottom:.2f}-{context.zones.lower_zone_top:.2f}")
+                logger.info(f"  Weekly bars count: {len(context.weekly_bars)}")
+                logger.info(f"  Open trades: {len(open_trades)}, Signal triggered this week: {context.signal_triggered_this_week}")
             
             # Check for expiry and close positions
             expiry_pnl = await self._check_and_close_expiry_positions(
@@ -257,11 +284,21 @@ class RunBacktestUseCase:
             
             # Evaluate signals (only if no open position)
             if not open_trades and not context.signal_triggered_this_week:
+                # Debug logging
+                if i < 10:  # Log first 10 bars
+                    logger.info(f"Bar {i+1}: {current_bar.timestamp}, evaluating signals...")
                 signal_result = self.signal_evaluator.evaluate_all_signals(
                     current_bar, context
                 )
                 
+                # Debug log for Monday
+                if current_bar.timestamp.date() == datetime(2025, 7, 14).date():
+                    logger.info(f"  Signal evaluation result: {signal_result.is_triggered}")
+                    if signal_result.is_triggered:
+                        logger.info(f"    Signal: {signal_result.signal_type}, Strike: {signal_result.strike_price}")
+                
                 if signal_result.is_triggered and signal_result.signal_type.value in params.signals_to_test:
+                    logger.info(f"SIGNAL TRIGGERED! Type: {signal_result.signal_type}, Strike: {signal_result.strike_price}")
                     # Open new trade
                     trade = await self._open_trade(
                         backtest_run.id,
@@ -272,12 +309,15 @@ class RunBacktestUseCase:
                     )
                     
                     if trade:
+                        logger.info(f"Trade created successfully with ID: {trade.id}")
                         open_trades.append(trade)
                         all_trades.append(trade)
                         
-                        # Deduct margin/premium
-                        position_cost = await self._calculate_position_cost(trade)
-                        current_capital -= position_cost
+                        # For option selling, capital doesn't change when entering trade
+                        # Premium is not realized until trade is closed
+                        # Margin requirements are handled separately in real trading
+                    else:
+                        logger.error("Failed to create trade despite signal trigger!")
         
         # Close any remaining open trades at end
         for trade in open_trades:
@@ -327,27 +367,39 @@ class RunBacktestUseCase:
         params: BacktestParameters
     ) -> Optional[BacktestTrade]:
         """Open a new trade based on signal"""
+        logger.info(f"_open_trade called for {signal_result.signal_type} at {current_bar.timestamp}")
         try:
             # Get expiry for current week
-            expiry = self.context_manager.get_expiry_for_week(context.current_week_start)
+            expiry = self.context_manager.get_expiry_for_week(self.context_manager.current_week_start)
+            logger.info(f"Expiry for trade: {expiry}")
             
-            # Get strikes
-            main_strike, hedge_strike = self.option_pricing.get_option_strikes_for_signal(
-                current_bar.close,
-                signal_result.signal_type.value,
-                params.hedge_offset
-            )
+            # Use strike from signal result (calculated based on stop loss)
+            main_strike = signal_result.strike_price
+            
+            # For option selling, stop loss is the main strike price itself
+            actual_stop_loss = float(main_strike)
+            
+            # Calculate hedge strike based on signal direction
+            if signal_result.signal_type.is_bullish:
+                # For PE sell, hedge is further OTM (lower strike)
+                hedge_strike = main_strike - params.hedge_offset
+            else:
+                # For CE sell, hedge is further OTM (higher strike)
+                hedge_strike = main_strike + params.hedge_offset
             
             # Create trade record with zone information
+            # Entry time is at the close of next candle (signal at 10:15, enter at 11:15 close)
+            entry_time = current_bar.timestamp + timedelta(hours=1)
+            
             trade = BacktestTrade(
                 backtest_run_id=backtest_run_id,
-                week_start_date=context.current_week_start,
+                week_start_date=self.context_manager.current_week_start,
                 signal_type=signal_result.signal_type.value,
                 direction=signal_result.direction.value,
-                entry_time=current_bar.timestamp,
+                entry_time=entry_time,
                 index_price_at_entry=Decimal(str(current_bar.close)),
                 signal_trigger_price=Decimal(str(signal_result.entry_price)),
-                stop_loss_price=Decimal(str(signal_result.stop_loss)),
+                stop_loss_price=Decimal(str(actual_stop_loss)),  # Use strike as stop loss
                 outcome=TradeOutcome.OPEN,
                 # Zone information
                 resistance_zone_top=Decimal(str(context.zones.upper_zone_top)),
@@ -370,51 +422,71 @@ class RunBacktestUseCase:
                 distance_to_support=Decimal(str(context.bias.distance_to_support))
             )
             
-            # Get option prices and create positions
+            # Get option prices first to validate we can create the trade
             option_type = signal_result.option_type
             
             # Main position (sell)
+            # Use current bar timestamp for price lookup (data availability)
+            # but entry_time for trade record (candle close)
             main_price = await self.option_pricing.get_option_price_at_time(
                 current_bar.timestamp, main_strike, option_type, expiry
             )
             
-            if main_price:
+            if not main_price:
+                logger.warning(f"No option price found for main position {main_strike} {option_type} at {current_bar.timestamp}")
+                return None  # Cannot create trade without option data
+            
+            # Hedge position (buy) if enabled
+            hedge_price = None
+            if params.use_hedging:
+                hedge_price = await self.option_pricing.get_option_price_at_time(
+                    current_bar.timestamp, hedge_strike, option_type, expiry
+                )
+                
+                if not hedge_price:
+                    logger.warning(f"No option price found for hedge position {hedge_strike} {option_type} at {current_bar.timestamp}")
+                    return None  # Cannot create trade without hedge data when hedging is enabled
+            
+            # Save trade to database first to get ID
+            with self.db_manager.get_session() as session:
+                session.add(trade)
+                session.commit()
+                session.refresh(trade)
+                
+                # Now create positions with the trade ID
                 main_position = BacktestPosition(
                     trade_id=trade.id,
                     position_type="MAIN",
                     option_type=option_type,
                     strike_price=main_strike,
                     expiry_date=expiry,
-                    entry_time=current_bar.timestamp,
+                    entry_time=entry_time,
                     entry_price=Decimal(str(main_price)),
-                    quantity=-params.lot_size  # Negative for sell
+                    quantity=-(params.lot_size * params.lots_to_trade)  # Negative for sell
                 )
-                trade.positions.append(main_position)
-            
-            # Hedge position (buy) if enabled
-            if params.use_hedging:
-                hedge_price = await self.option_pricing.get_option_price_at_time(
-                    current_bar.timestamp, hedge_strike, option_type, expiry
-                )
+                session.add(main_position)
                 
-                if hedge_price:
+                if params.use_hedging and hedge_price:
                     hedge_position = BacktestPosition(
                         trade_id=trade.id,
                         position_type="HEDGE",
                         option_type=option_type,
                         strike_price=hedge_strike,
                         expiry_date=expiry,
-                        entry_time=current_bar.timestamp,
+                        entry_time=entry_time,
                         entry_price=Decimal(str(hedge_price)),
-                        quantity=params.lot_size  # Positive for buy
+                        quantity=(params.lot_size * params.lots_to_trade)  # Positive for buy
                     )
-                    trade.positions.append(hedge_position)
-            
-            # Save trade to database
-            with self.db_manager.get_session() as session:
-                session.add(trade)
+                    session.add(hedge_position)
+                
                 session.commit()
                 session.refresh(trade)
+                
+                # Eager load positions to avoid detached instance error
+                from sqlalchemy.orm import joinedload
+                trade = session.query(BacktestTrade).options(
+                    joinedload(BacktestTrade.positions)
+                ).filter_by(id=trade.id).first()
             
             logger.info(f"Opened trade: {signal_result.signal_type.value} at {current_bar.timestamp}")
             return trade
@@ -473,15 +545,20 @@ class RunBacktestUseCase:
             if trade.outcome != TradeOutcome.OPEN:
                 continue
             
+            # Skip stop loss check if trade hasn't entered yet
+            if current_bar.timestamp <= trade.entry_time:
+                continue
+            
             # Check stop loss based on signal direction
             hit_stop_loss = False
             
-            if trade.direction == "BULLISH":
-                # For bullish trades (sold PUT), stop if price goes below strike
+            # Direction is stored as integer: 1 for BULLISH, -1 for BEARISH
+            if trade.direction == "1" or trade.direction == 1:
+                # For bullish trades (sold PUT), stop if price goes below stop loss
                 if current_bar.close <= float(trade.stop_loss_price):
                     hit_stop_loss = True
             else:
-                # For bearish trades (sold CALL), stop if price goes above strike
+                # For bearish trades (sold CALL), stop if price goes above stop loss
                 if current_bar.close >= float(trade.stop_loss_price):
                     hit_stop_loss = True
             
@@ -509,7 +586,8 @@ class RunBacktestUseCase:
         exit_time: datetime,
         index_price: float,
         outcome: TradeOutcome,
-        reason: str
+        reason: str,
+        session = None
     ) -> float:
         """Close a trade and calculate P&L"""
         trade.exit_time = exit_time
@@ -549,8 +627,9 @@ class RunBacktestUseCase:
                 position.gross_pnl = position.quantity * (position.exit_price - position.entry_price)
             
             # Commission (entry + exit)
-            lots = abs(position.quantity) // 50
-            position.commission = Decimal(str(lots * 40 * 2))
+            # Using lot size of 75 (as per requirements)
+            lots = abs(position.quantity) // 75
+            position.commission = Decimal(str(lots * 40 * 2))  # Rs. 40 per lot, 2 for entry+exit
             position.net_pnl = position.gross_pnl - position.commission
             
             total_pnl += float(position.net_pnl)
@@ -573,16 +652,20 @@ class RunBacktestUseCase:
     
     async def _calculate_position_cost(self, trade: BacktestTrade) -> float:
         """Calculate initial cost/margin for positions"""
-        total_cost = 0.0
+        net_premium = 0.0
         
         for position in trade.positions:
-            if position.quantity > 0:  # Bought option
-                # Cost is premium paid
-                total_cost += float(position.entry_price) * position.quantity
-            # For sold options, margin is handled separately in real trading
-            # For backtest, we assume sufficient margin
+            if position.quantity > 0:  # Bought option (hedge)
+                # Pay premium (cost)
+                net_premium -= float(position.entry_price) * position.quantity
+            else:  # Sold option (main position)
+                # Receive premium (income)
+                net_premium += float(position.entry_price) * abs(position.quantity)
         
-        return total_cost
+        # Return negative of net_premium because:
+        # - If net_premium is positive (received more than paid), we subtract negative = add to capital
+        # - If net_premium is negative (paid more than received), we subtract positive = reduce capital
+        return -net_premium
     
     def _calculate_max_drawdown(self, equity_curve: List[float]) -> Dict:
         """Calculate maximum drawdown from equity curve"""

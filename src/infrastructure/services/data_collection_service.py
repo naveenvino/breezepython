@@ -31,11 +31,18 @@ class DataCollectionService:
         self, 
         from_date: datetime, 
         to_date: datetime,
-        symbol: str = "NIFTY"
+        symbol: str = "NIFTY",
+        fetch_missing: bool = True
     ) -> int:
         """
         Ensure NIFTY index data is available for the given date range
         Fetches missing data if necessary
+        
+        Args:
+            from_date: Start date
+            to_date: End date
+            symbol: Symbol to fetch (default: NIFTY)
+            fetch_missing: If False, don't fetch from API (for backtesting)
         
         Returns: Number of records added
         """
@@ -46,6 +53,11 @@ class DataCollectionService:
         
         if not missing_ranges:
             logger.info("All NIFTY data already available")
+            return 0
+        
+        if not fetch_missing:
+            # Don't fetch from Breeze API during backtesting - use only existing data
+            logger.warning(f"NIFTY data missing for {len(missing_ranges)} ranges, but skipping API fetch (backtesting mode)")
             return 0
         
         total_added = 0
@@ -96,10 +108,18 @@ class DataCollectionService:
         from_date: datetime,
         to_date: datetime,
         strikes: List[int],
-        expiry_dates: List[datetime]
+        expiry_dates: List[datetime],
+        fetch_missing: bool = True
     ) -> int:
         """
         Ensure options data is available for given strikes and expiries
+        
+        Args:
+            from_date: Start date
+            to_date: End date
+            strikes: List of strike prices
+            expiry_dates: List of expiry dates
+            fetch_missing: If False, don't fetch from API (for backtesting)
         
         Returns: Number of records added
         """
@@ -116,11 +136,16 @@ class DataCollectionService:
                     )
                     
                     if not exists:
-                        # Fetch and store
-                        added = await self._fetch_and_store_option_data(
-                            strike, option_type, expiry, from_date, to_date
-                        )
-                        total_added += added
+                        if not fetch_missing:
+                            # Skip fetching from Breeze API - use only existing historical data
+                            logger.warning(f"Options data not found for {strike} {option_type} expiry {expiry.date()} (backtesting mode)")
+                            continue
+                        else:
+                            # Fetch and store
+                            added = await self._fetch_and_store_option_data(
+                                strike, option_type, expiry, from_date, to_date
+                            )
+                            total_added += added
         
         return total_added
     
@@ -232,11 +257,16 @@ class DataCollectionService:
     ) -> bool:
         """Check if option data exists for given parameters"""
         with self.db_manager.get_session() as session:
+            # Check both date and datetime to handle timezone differences
+            # Use date range comparison for SQL Server compatibility
+            expiry_start = expiry.replace(hour=0, minute=0, second=0, microsecond=0)
+            expiry_end = expiry.replace(hour=23, minute=59, second=59, microsecond=999999)
+            
             count = session.query(func.count(OptionsHistoricalData.id)).filter(
                 and_(
                     OptionsHistoricalData.strike == strike,
                     OptionsHistoricalData.option_type == option_type,
-                    OptionsHistoricalData.expiry_date == expiry,
+                    OptionsHistoricalData.expiry_date.between(expiry_start, expiry_end),
                     OptionsHistoricalData.timestamp >= from_date,
                     OptionsHistoricalData.timestamp <= to_date
                 )
@@ -322,15 +352,16 @@ class DataCollectionService:
         self,
         from_date: datetime,
         to_date: datetime,
-        symbol: str = "NIFTY 50"
+        symbol: str = "NIFTY"
     ) -> List[NiftyIndexData]:
-        """Get NIFTY data from database"""
+        """Get NIFTY data from database - HOURLY DATA ONLY for backtesting"""
         with self.db_manager.get_session() as session:
             return session.query(NiftyIndexData).filter(
                 and_(
                     NiftyIndexData.symbol == symbol,
                     NiftyIndexData.timestamp >= from_date,
-                    NiftyIndexData.timestamp <= to_date
+                    NiftyIndexData.timestamp <= to_date,
+                    NiftyIndexData.interval == 'hourly'  # Only get hourly data for signals
                 )
             ).order_by(NiftyIndexData.timestamp).all()
     
@@ -344,7 +375,9 @@ class DataCollectionService:
         """Get option data at specific timestamp"""
         with self.db_manager.get_session() as session:
             # Get closest data point within 1 hour
-            return session.query(OptionsHistoricalData).filter(
+            # Handle expiry time mismatch - DB has 05:30:00 but we might look for 15:30:00
+            # First try exact match
+            result = session.query(OptionsHistoricalData).filter(
                 and_(
                     OptionsHistoricalData.strike == strike,
                     OptionsHistoricalData.option_type == option_type,
@@ -352,9 +385,22 @@ class DataCollectionService:
                     OptionsHistoricalData.timestamp >= timestamp - timedelta(hours=1),
                     OptionsHistoricalData.timestamp <= timestamp + timedelta(hours=1)
                 )
-            ).order_by(
-                func.abs(func.extract('epoch', OptionsHistoricalData.timestamp - timestamp))
-            ).first()
+            ).order_by(OptionsHistoricalData.timestamp).first()
+            
+            # If not found and expiry time is 15:30, try with 05:30
+            if not result and expiry.hour == 15 and expiry.minute == 30:
+                expiry_with_db_time = expiry.replace(hour=5, minute=30)
+                result = session.query(OptionsHistoricalData).filter(
+                    and_(
+                        OptionsHistoricalData.strike == strike,
+                        OptionsHistoricalData.option_type == option_type,
+                        OptionsHistoricalData.expiry_date == expiry_with_db_time,
+                        OptionsHistoricalData.timestamp >= timestamp - timedelta(hours=1),
+                        OptionsHistoricalData.timestamp <= timestamp + timedelta(hours=1)
+                    )
+                ).order_by(OptionsHistoricalData.timestamp).first()
+            
+            return result
     
     async def get_available_strikes(
         self,
@@ -386,7 +432,7 @@ class DataCollectionService:
         self,
         from_date: datetime,
         to_date: datetime,
-        symbol: str = "NIFTY 50"
+        symbol: str = "NIFTY"
     ) -> int:
         """
         Create hourly candles from 5-minute data

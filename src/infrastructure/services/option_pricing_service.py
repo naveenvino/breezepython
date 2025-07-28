@@ -5,8 +5,6 @@ Service for calculating option prices and managing option data
 import logging
 from datetime import datetime, timedelta
 from typing import Optional, Tuple, List
-import numpy as np
-from scipy.stats import norm
 
 from ..database.models import OptionsHistoricalData
 from .data_collection_service import DataCollectionService
@@ -23,7 +21,6 @@ class OptionPricingService:
     def __init__(self, data_collection_service: DataCollectionService, db_manager=None):
         self.data_collection = data_collection_service
         self.db_manager = db_manager  # Can be None, service will handle it
-        self.risk_free_rate = 0.065  # 6.5% annual
     
     def calculate_atm_strike(self, spot_price: float, strike_interval: int = 50) -> int:
         """
@@ -92,104 +89,15 @@ class OptionPricingService:
             # Use mid price between bid and ask if available
             if option_data.bid_price and option_data.ask_price:
                 return float((option_data.bid_price + option_data.ask_price) / 2)
-            else:
+            elif option_data.last_price:
                 return float(option_data.last_price)
-        
-        # If no data, estimate using Black-Scholes
-        return await self._estimate_option_price(
-            timestamp, strike, option_type, expiry
-        )
-    
-    async def _estimate_option_price(
-        self,
-        timestamp: datetime,
-        strike: int,
-        option_type: str,
-        expiry: datetime
-    ) -> Optional[float]:
-        """
-        Estimate option price using Black-Scholes model
-        """
-        try:
-            # Get NIFTY spot price at timestamp
-            nifty_data = await self.data_collection.get_nifty_data(
-                timestamp - timedelta(minutes=30),
-                timestamp + timedelta(minutes=30)
-            )
-            
-            if not nifty_data:
-                logger.warning(f"No NIFTY data found for {timestamp}")
-                return None
-            
-            spot_price = float(nifty_data[0].close)
-            
-            # Calculate time to expiry in years
-            time_to_expiry = (expiry - timestamp).total_seconds() / (365 * 24 * 3600)
-            
-            if time_to_expiry <= 0:
-                # Option expired
-                if option_type == 'CE':
-                    return max(0, spot_price - strike)
-                else:  # PE
-                    return max(0, strike - spot_price)
-            
-            # Estimate IV based on moneyness and time to expiry
-            moneyness = spot_price / strike
-            base_iv = 0.15  # 15% base IV
-            
-            # Adjust IV based on moneyness
-            if 0.95 <= moneyness <= 1.05:  # ATM
-                iv = base_iv
-            elif moneyness > 1.05:  # ITM for CE, OTM for PE
-                if option_type == 'CE':
-                    iv = base_iv * 0.8
-                else:
-                    iv = base_iv * 1.2
-            else:  # OTM for CE, ITM for PE
-                if option_type == 'CE':
-                    iv = base_iv * 1.2
-                else:
-                    iv = base_iv * 0.8
-            
-            # Black-Scholes calculation
-            price = self._black_scholes(
-                spot_price, strike, time_to_expiry, 
-                self.risk_free_rate, iv, option_type
-            )
-            
-            return price
-            
-        except Exception as e:
-            logger.error(f"Error estimating option price: {e}")
-            return None
-    
-    def _black_scholes(
-        self,
-        S: float,  # Spot price
-        K: float,  # Strike price
-        T: float,  # Time to expiry in years
-        r: float,  # Risk-free rate
-        sigma: float,  # Volatility
-        option_type: str  # 'CE' or 'PE'
-    ) -> float:
-        """
-        Calculate option price using Black-Scholes formula
-        """
-        if T <= 0:
-            if option_type == 'CE':
-                return max(0, S - K)
             else:
-                return max(0, K - S)
+                logger.warning(f"Option data found but no price available for {strike} {option_type} at {timestamp}")
+                return None
         
-        d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
-        d2 = d1 - sigma * np.sqrt(T)
-        
-        if option_type == 'CE':
-            price = S * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2)
-        else:  # PE
-            price = K * np.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
-        
-        return max(0, price)
+        # No data found
+        logger.warning(f"No option data found for {strike} {option_type} at {timestamp}")
+        return None
     
     def calculate_option_payoff(
         self,

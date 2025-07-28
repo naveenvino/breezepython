@@ -1,6 +1,6 @@
-# KiteApp Python - Clean Architecture Trading Platform
+# BreezeConnect Trading System - Clean Architecture
 
-A comprehensive trading platform built with Clean Architecture principles, integrating Breeze API for automated trading, backtesting, and market analysis.
+A comprehensive trading platform built with Clean Architecture principles, integrating Breeze API for automated trading, backtesting, and market data collection.
 
 ## 🚀 Quick Start
 
@@ -22,141 +22,207 @@ BREEZE_API_SECRET=your_api_secret
 BREEZE_SESSION_TOKEN=your_session_token
 ```
 
-### 3. Run the Application
+### 3. Available APIs
+
+#### Unified Trading API (Recommended) - Port 8000
 ```bash
-python run.py
+# Start the unified API with all features
+python -m api.unified_trading_api
+
+# Access at http://localhost:8000/docs
 ```
 
-The API will be available at `http://localhost:8100`
+This consolidated API includes:
+- ✅ Backtest (both GET and POST methods)
+- ✅ Data Collection (NIFTY and Options)
+- ✅ Data Deletion
+- ✅ Signal Analysis
+- ✅ Health Checks
 
-### 4. View API Documentation
-- Swagger UI: `http://localhost:8100/docs`
-- ReDoc: `http://localhost:8100/redoc`
-
-### 5. Test the API
+#### Alternative APIs (in api/ folder)
+If you prefer to use individual APIs:
 ```bash
-python test_api.py
+# Main Clean Architecture API
+python -m src.api.main
+
+# Data Collection API
+python -m api.data_collection_api
+
+# Backtest POST API
+python -m api.backtest_api_post
+
+# Backtest GET API  
+python -m api.backtest_api_get
 ```
 
 ## 📁 Project Structure
 
 ```
-src/
-├── domain/           # Core business logic (entities, value objects, interfaces)
-├── application/      # Use cases and application services
-├── infrastructure/   # External services, database, API implementations
-└── api/             # FastAPI routes and HTTP layer
+breezepython/
+├── src/                          # Clean architecture source code
+│   ├── domain/                   # Core business logic
+│   ├── application/              # Use cases and DTOs
+│   ├── infrastructure/           # External services, database
+│   └── api/                      # FastAPI routes
+├── api/                          # All API modules
+│   ├── unified_trading_api.py    # 🆕 Complete unified API (recommended)
+│   ├── data_collection_api.py    # NIFTY & options data collection
+│   ├── backtest_api_post.py      # POST endpoint backtest
+│   ├── backtest_api_get.py       # GET endpoint backtest
+│   └── optimizations/            # Performance optimization modules
+├── api_backup_20250728/          # Backup of original APIs
+├── scripts/                      # Utility scripts
+├── docs/                         # Documentation
+└── tests/                        # Test suite
 ```
-
-## 🧪 Testing Examples
-
-### Run API Tests
-```bash
-# Test all endpoints
-python test_api.py
-
-# Direct usage examples (without API)
-python example_direct_usage.py
-```
-
-### API Examples
-
-#### Collect Weekly Options Data
-```bash
-curl -X POST "http://localhost:8100/api/v2/data/collect/weekly" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "from_date": "2024-01-01",
-    "to_date": "2024-01-31",
-    "symbol": "NIFTY",
-    "strike_range": 500
-  }'
-```
-
-#### Run Backtest
-```bash
-curl -X POST "http://localhost:8100/api/v2/backtest/run" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "strategy_name": "WeeklySignals",
-    "from_date": "2024-01-01",
-    "to_date": "2024-01-31",
-    "initial_capital": 100000,
-    "symbol": "NIFTY"
-  }'
-```
-
-#### Calculate Position Size
-```bash
-curl -X POST "http://localhost:8100/api/v2/trading/risk/position-size" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "capital": 100000,
-    "risk_percentage": 2,
-    "entry_price": 23500,
-    "stop_loss": 23300,
-    "lot_size": 50
-  }'
-```
-
-## 📚 Documentation
-
-- **Quick Start Guide**: See `QUICK_START_GUIDE.md` for detailed setup and usage
-- **Architecture**: See `README_ARCHITECTURE.md` for clean architecture details
-- **API Documentation**: Available at `/docs` when the server is running
 
 ## 🛠️ Key Features
 
-### Clean Architecture
-- **Domain Layer**: Pure business logic with no external dependencies
-- **Application Layer**: Use cases orchestrating business operations
-- **Infrastructure Layer**: All external concerns (database, APIs, etc.)
-- **Dependency Injection**: Loose coupling and testability
+### 1. Data Collection API
+- **NIFTY Index Data**: 5-minute and hourly candles
+- **Options Data**: Historical options prices with Greeks
+- **Bulk Operations**: Optimized for large date ranges
+- **Smart Caching**: Reduces API calls and improves performance
 
-### Trading Features
-- **Data Collection**: Automated NIFTY and options data collection
-- **Backtesting**: Strategy backtesting with comprehensive metrics
-- **Risk Management**: Position sizing, Kelly Criterion, portfolio analysis
-- **Option Pricing**: Black-Scholes pricing and Greeks calculation
-- **Signal Processing**: Weekly trading signals evaluation
+### 2. Backtest System
+- **8 Trading Signals**: S1-S8 with customizable parameters
+- **Position Management**: Entry, exit, stop loss logic
+- **Risk Management**: Configurable lot sizes and hedging
+- **Performance Metrics**: Detailed P&L analysis
 
-### API Endpoints
-- `/api/v2/data/` - Data collection operations
-- `/api/v2/analysis/` - Market analysis and insights
-- `/api/v2/trading/` - Trading operations and risk management
-- `/api/v2/backtest/` - Strategy backtesting
+### 3. Clean Architecture
+- **Domain Layer**: Pure business logic
+- **Application Layer**: Use cases orchestration
+- **Infrastructure Layer**: External integrations
+- **Dependency Injection**: Loose coupling
 
-## 🔧 Development
+## 📚 API Documentation - Unified API
 
-### Run Tests
+All endpoints are available at `http://localhost:8000` when running the unified API.
+
+### Backtest Endpoints
+
+#### Run Backtest (POST) - Recommended
 ```bash
-pytest tests/
+POST http://localhost:8000/api/backtest
+{
+  "from_date": "2025-07-01",
+  "to_date": "2025-07-31",
+  "signals_to_test": ["S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8"],
+  "lot_size": 75,
+  "lots_to_trade": 10,
+  "initial_capital": 500000,
+  "use_hedging": true,
+  "hedge_offset": 200,
+  "commission_per_lot": 40
+}
 ```
 
-### Add New Features
-1. Domain logic goes in `src/domain/`
-2. Use cases go in `src/application/use_cases/`
-3. External integrations go in `src/infrastructure/`
-4. API routes go in `src/api/routers/`
-
-### Debug Mode
-Set in `.env`:
-```env
-APP_DEBUG=true
-LOG_LEVEL=DEBUG
+#### Run Backtest (GET) - Quick Testing
+```bash
+GET http://localhost:8000/api/backtest?from_date=2025-07-01&to_date=2025-07-31&signals_to_test=S1,S2,S3
 ```
+
+### Data Collection Endpoints
+
+#### Collect NIFTY Data
+```bash
+POST http://localhost:8000/api/collect/nifty
+{
+  "from_date": "2025-01-01",
+  "to_date": "2025-01-31",
+  "symbol": "NIFTY",
+  "force_refresh": false
+}
+```
+
+#### Collect Options Data
+```bash
+POST http://localhost:8000/api/collect/options
+{
+  "from_date": "2025-01-01", 
+  "to_date": "2025-01-31",
+  "symbol": "NIFTY",
+  "strike_range": 500,
+  "use_optimization": true
+}
+```
+
+### Analysis Endpoints
+
+#### Check Data Availability
+```bash
+GET http://localhost:8000/api/data/check?from_date=2025-07-01&to_date=2025-07-31&symbol=NIFTY
+```
+
+#### Get Available Signals
+```bash
+GET http://localhost:8000/api/signals/available
+```
+
+## 🧪 Testing
+
+### Test Backtest System
+```python
+# Test all 8 signals for a specific period
+python backtest_api_post.py
+# Navigate to http://localhost:8002/docs
+# Use the /backtest endpoint with desired parameters
+```
+
+### Test Data Collection
+```python
+# Start the data collection API
+python -m api.data_collection_api
+# Navigate to http://localhost:8002/docs
+# Use /collect/nifty or /collect/options endpoints
+```
+
+## 📊 Trading Signals
+
+- **S1** - Bear Trap (Bullish) - Sell PUT
+- **S2** - Support Hold (Bullish) - Sell PUT
+- **S3** - Resistance Hold (Bearish) - Sell CALL
+- **S4** - Bias Failure Bull (Bullish) - Sell PUT
+- **S5** - Bias Failure Bear (Bearish) - Sell CALL
+- **S6** - Weakness Confirmed (Bearish) - Sell CALL
+- **S7** - Breakout Confirmed (Bullish) - Sell PUT
+- **S8** - Breakdown Confirmed (Bearish) - Sell CALL
+
+## 🔧 Configuration
+
+### Database Settings
+Configure in `src/config/settings.py` or via environment variables:
+```python
+DB_SERVER = os.getenv('DB_SERVER', '(localdb)\\mssqllocaldb')
+DB_NAME = os.getenv('DB_NAME', 'KiteConnectApi')
+```
+
+### API Settings
+```python
+# Port configuration
+MAIN_API_PORT = 8000
+DATA_COLLECTION_PORT = 8002
+BACKTEST_GET_PORT = 8001
+```
+
+## 📈 Performance Optimizations
+
+- **Parallel Processing**: Multi-threaded data collection
+- **Smart Caching**: Reduces redundant API calls
+- **Bulk Operations**: Efficient database inserts
+- **Connection Pooling**: Optimized database connections
+
+## 🐛 Troubleshooting
+
+1. **API Key Issues**: Ensure Breeze API credentials are correct in `.env`
+2. **Database Connection**: Check SQL Server is running and accessible
+3. **Port Conflicts**: Ensure ports 8000, 8001, 8002 are available
+4. **Missing Data**: Run data collection before backtesting
 
 ## 📞 Support
 
-For issues or questions:
-1. Check `QUICK_START_GUIDE.md` for common issues
-2. Review logs in `logs/` directory
-3. Check API documentation at `/docs`
-
-## 🏗️ Architecture Benefits
-
-- **Testable**: Each layer can be tested independently
-- **Maintainable**: Clear separation of concerns
-- **Scalable**: Easy to add new features
-- **Flexible**: Swap implementations without changing business logic
-- **Framework Independent**: Core logic doesn't depend on FastAPI
+For detailed information:
+- See `BACKTEST_CAPABILITIES.md` for backtest features
+- Check `docs/` folder for additional documentation
+- Review API documentation at `/docs` endpoints

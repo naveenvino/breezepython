@@ -1,6 +1,76 @@
-# Directory Cleanup Summary - January 27, 2025
+# Directory Cleanup Summary
 
-## Overview
+## Latest Cleanup: July 28, 2025
+
+### Overview
+Second major cleanup focusing on test and debug files accumulated during backtest development and fixes.
+
+### Files Archived to `archive/cleanup_20250728/`:
+- **Test Files**: 47 test_*.py scripts
+- **Debug Files**: 19 debug_*.py scripts  
+- **Check Scripts**: 31 check_*.py files
+- **Verification Scripts**: 16 verify_*.py files
+- **Analysis Scripts**: 6 analyze_*.py files
+- **SQL Files**: 13 .sql files (queries, fixes, verifications)
+- **Documentation**: 10 .md files (summaries, reports, guides)
+- **Utility Scripts**: 20+ miscellaneous scripts (run_*, find_*, trace_*, etc.)
+- **Duplicate Breeze Services**: 9 breeze_service_*.py variations
+- **Batch Files**: 3 start_*.bat files
+- **JSON Files**: 2 test configuration files
+- **Other**: Session continuation file, indicator text, curl commands
+
+**Total Files Archived**: ~180 files
+
+### Retained Working APIs:
+1. **Main API** (`src/api/main.py`) - Port 8000
+   - `/api/v2/backtest` - Backtesting endpoints
+   - `/api/v2/signals` - Signal testing endpoints
+   
+2. **Data Collection API** (`api/data_collection_api.py`) - Port 8002
+   - `/collect/nifty` - Collect NIFTY data
+   - `/collect/options` - Collect options data
+   
+3. **Backtest APIs**:
+   - `backtest_api_post.py` - POST endpoint (Port 8002)
+   - `backtest_api_get.py` - GET endpoint (Port 8001)
+
+### Key Improvements Made Before Cleanup:
+- Fixed entry time to second candle close (11:15)
+- Fixed stop loss to use main strike price (25000)
+- Fixed direction comparison for stop loss logic
+- Resolved API returning 0 trades issue
+
+### Final Clean Root Directory Structure:
+```
+breezepython/
+├── BACKTEST_CAPABILITIES.md    # API capabilities documentation
+├── CLAUDE.md                    # Claude-specific instructions
+├── CLEANUP_SUMMARY.md           # This file
+├── README.md                    # Project readme
+├── requirements.txt             # Python dependencies
+├── start_api.bat               # Main API starter
+├── backtest_api_get.py         # GET backtest API (Port 8001)
+├── backtest_api_post.py        # POST backtest API (Port 8002)
+├── kite_trading.db             # SQLite database
+├── market_data.db              # Market data database
+├── nul                         # Windows null file
+├── api/                        # API modules
+├── archive/                    # Archived files (in .gitignore)
+├── config/                     # Configuration
+├── data/                       # Data files
+├── docs/                       # Documentation
+├── logs/                       # Log files
+├── migrations/                 # Database migrations
+├── scripts/                    # Utility scripts
+├── src/                        # Clean architecture source
+└── tests/                      # Test suite
+```
+
+---
+
+## Previous Cleanup: January 27, 2025
+
+### Overview
 Successfully cleaned and reorganized the breezepython project directory, reducing clutter from 136 files to a well-organized structure.
 
 ## Key Achievements

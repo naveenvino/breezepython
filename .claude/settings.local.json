@@ -34,7 +34,15 @@
       "Bash(dir:*)",
       "Bash(set PYTHONPATH=.)",
       "Bash(del:*)",
-      "Bash(move:*)"
+      "Bash(move:*)",
+      "Bash(pkill:*)",
+      "Bash(true)",
+      "Bash(start python run_backtest_api.py)",
+      "Bash(grep:*)",
+      "Bash(start /b python:*)",
+      "Bash(sqlcmd:*)",
+      "Bash(echo)",
+      "Bash(stop_all_apis.bat)"
     ],
     "deny": []
   }
