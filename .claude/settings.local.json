@@ -42,7 +42,10 @@
       "Bash(start /b python:*)",
       "Bash(sqlcmd:*)",
       "Bash(echo)",
-      "Bash(stop_all_apis.bat)"
+      "Bash(stop_all_apis.bat)",
+      "Bash(tasklist:*)",
+      "Bash(start python unified_api_correct.py)",
+      "Bash(pip search:*)"
     ],
     "deny": []
   }
