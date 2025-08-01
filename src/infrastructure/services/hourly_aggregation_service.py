@@ -8,7 +8,7 @@ from typing import List, Dict, Optional, Tuple
 from sqlalchemy import and_, func
 from decimal import Decimal
 
-from ..database.models import NiftyIndexData
+from ..database.models import NiftyIndexData, NiftyIndexDataHourly, NiftyIndexData5Minute
 from ..database.database_manager import get_db_manager
 
 logger = logging.getLogger(__name__)
@@ -77,14 +77,13 @@ class HourlyAggregationService:
             end_datetime = datetime.combine(date.date(), data_end_time)
             
             # Query 5-minute data for this hour
-            five_min_data = session.query(NiftyIndexData).filter(
+            five_min_data = session.query(NiftyIndexData5Minute).filter(
                 and_(
-                    NiftyIndexData.symbol == symbol,
-                    NiftyIndexData.interval == "5minute",
-                    NiftyIndexData.timestamp >= start_datetime,
-                    NiftyIndexData.timestamp <= end_datetime
+                    NiftyIndexData5Minute.symbol == symbol,
+                    NiftyIndexData5Minute.timestamp >= start_datetime,
+                    NiftyIndexData5Minute.timestamp <= end_datetime
                 )
-            ).order_by(NiftyIndexData.timestamp).all()
+            ).order_by(NiftyIndexData5Minute.timestamp).all()
             
             if not five_min_data:
                 logger.info(f"No 5-minute data found for {date.date()} {hour_time}")
@@ -152,7 +151,7 @@ class HourlyAggregationService:
     
     def create_hourly_bars_from_5min(
         self,
-        five_min_bars: List[NiftyIndexData]
+        five_min_bars: List[NiftyIndexData5Minute]
     ) -> List[Dict]:
         """
         Create hourly bars from a list of 5-minute bars
@@ -206,7 +205,7 @@ class HourlyAggregationService:
     
     def _aggregate_bars(
         self, 
-        bars: List[NiftyIndexData], 
+        bars: List[NiftyIndexData5Minute], 
         hour_start: time
     ) -> Dict:
         """
@@ -236,7 +235,7 @@ class HourlyAggregationService:
             'symbol': bars[0].symbol
         }
     
-    def store_hourly_candle(self, hourly_candle: Dict) -> NiftyIndexData:
+    def store_hourly_candle(self, hourly_candle: Dict) -> NiftyIndexDataHourly:
         """
         Store an hourly candle in the database
         
@@ -244,15 +243,14 @@ class HourlyAggregationService:
             hourly_candle: Dictionary with hourly OHLC data
             
         Returns:
-            Created NiftyIndexData object
+            Created NiftyIndexDataHourly object
         """
         with self.db_manager.get_session() as session:
-            # Check if already exists
-            existing = session.query(NiftyIndexData).filter(
+            # Check if already exists in hourly table
+            existing = session.query(NiftyIndexDataHourly).filter(
                 and_(
-                    NiftyIndexData.symbol == hourly_candle['symbol'],
-                    NiftyIndexData.timestamp == hourly_candle['timestamp'],
-                    NiftyIndexData.interval == "hourly"
+                    NiftyIndexDataHourly.symbol == hourly_candle['symbol'],
+                    NiftyIndexDataHourly.timestamp == hourly_candle['timestamp']
                 )
             ).first()
             
@@ -261,7 +259,7 @@ class HourlyAggregationService:
                 return existing
             
             # Create new hourly candle
-            hourly_data = NiftyIndexData(
+            hourly_data = NiftyIndexDataHourly(
                 symbol=hourly_candle['symbol'],
                 timestamp=hourly_candle['timestamp'],
                 open=Decimal(str(hourly_candle['open'])),
@@ -270,7 +268,6 @@ class HourlyAggregationService:
                 close=Decimal(str(hourly_candle['close'])),
                 last_price=Decimal(str(hourly_candle['close'])),
                 volume=hourly_candle['volume'],
-                interval="hourly",
                 last_update_time=datetime.now()
             )
             

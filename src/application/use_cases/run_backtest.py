@@ -11,11 +11,15 @@ import asyncio
 from ...domain.value_objects.signal_types import SignalType, BarData
 from ...domain.services.signal_evaluator import SignalEvaluator
 from ...domain.services.weekly_context_manager import WeeklyContextManager
+from ...domain.services.margin_calculator import MarginCalculator
+from ...domain.services.risk_manager import RiskManager
+from ...domain.services.market_calendar import MarketCalendar
 from ...infrastructure.services.data_collection_service import DataCollectionService
 from ...infrastructure.services.option_pricing_service import OptionPricingService
+from ...infrastructure.validation.market_data_validator import MarketDataValidator
 from ...infrastructure.database.models import (
     BacktestRun, BacktestTrade, BacktestPosition, BacktestDailyResult,
-    BacktestStatus, NiftyIndexData, TradeOutcome
+    BacktestStatus, NiftyIndexData, NiftyIndexDataHourly, TradeOutcome
 )
 from ...infrastructure.database.database_manager import get_db_manager
 
@@ -60,13 +64,27 @@ class RunBacktestUseCase:
     def __init__(
         self,
         data_collection_service: DataCollectionService,
-        option_pricing_service: OptionPricingService
+        option_pricing_service: OptionPricingService,
+        enable_risk_management: bool = False  # Disable by default for backtesting
     ):
         self.data_collection = data_collection_service
         self.option_pricing = option_pricing_service
         self.signal_evaluator = SignalEvaluator()
         self.context_manager = WeeklyContextManager()
         self.db_manager = get_db_manager()
+        self.enable_risk_management = enable_risk_management
+        
+        # Initialize new services only if risk management is enabled
+        if enable_risk_management:
+            self.margin_calculator = MarginCalculator(lot_size=75)
+            self.risk_manager = None  # Will be initialized with parameters
+            self.market_calendar = MarketCalendar()
+            self.data_validator = MarketDataValidator(max_staleness_minutes=525600)  # 1 year for backtesting
+        else:
+            self.margin_calculator = None
+            self.risk_manager = None
+            self.market_calendar = None
+            self.data_validator = None
     
     async def execute(self, params: BacktestParameters) -> str:
         """
@@ -79,6 +97,13 @@ class RunBacktestUseCase:
             Backtest run ID
         """
         logger.info(f"Starting backtest from {params.from_date} to {params.to_date}")
+        
+        # Initialize risk manager with initial capital if enabled
+        if self.enable_risk_management:
+            self.risk_manager = RiskManager(
+                initial_capital=Decimal(str(params.initial_capital)),
+                lot_size=params.lot_size
+            )
         
         # Create backtest run record
         backtest_run = await self._create_backtest_run(params)
@@ -164,9 +189,9 @@ class RunBacktestUseCase:
         # Get current NIFTY level from recent data
         current_nifty = 25000  # Default fallback
         with self.db_manager.get_session() as session:
-            recent_data = session.query(NiftyIndexData).filter(
-                NiftyIndexData.timestamp <= to_date
-            ).order_by(NiftyIndexData.timestamp.desc()).first()
+            recent_data = session.query(NiftyIndexDataHourly).filter(
+                NiftyIndexDataHourly.timestamp <= to_date
+            ).order_by(NiftyIndexDataHourly.timestamp.desc()).first()
             if recent_data:
                 current_nifty = int(recent_data.close)
         
@@ -203,7 +228,7 @@ class RunBacktestUseCase:
     async def _run_backtest_logic(
         self,
         backtest_run: BacktestRun,
-        nifty_data: List[NiftyIndexData],
+        nifty_data: List[NiftyIndexDataHourly],
         params: BacktestParameters
     ) -> Dict:
         """Main backtest logic"""
@@ -224,6 +249,23 @@ class RunBacktestUseCase:
             # Skip non-market hours
             if not self.context_manager.is_market_hours(current_bar.timestamp):
                 continue
+                
+            # Validate NIFTY data if validator is enabled
+            if self.data_validator:
+                prev_close = nifty_data[i-1].close if i > 0 else None
+                validation_result = self.data_validator.validate_nifty_data(
+                    timestamp=current_bar.timestamp,
+                    open_price=current_bar.open,
+                    high_price=current_bar.high,
+                    low_price=current_bar.low,
+                    close_price=current_bar.close,
+                    volume=data_point.volume if hasattr(data_point, 'volume') else 1000,
+                    prev_close=float(prev_close) if prev_close else None
+                )
+                
+                if not validation_result.is_valid:
+                    logger.warning(f"Invalid NIFTY data at {current_bar.timestamp}: {validation_result.error_message}")
+                    continue
             
             # Check for new day
             if current_date != current_bar.timestamp.date():
@@ -288,7 +330,7 @@ class RunBacktestUseCase:
                 if i < 10:  # Log first 10 bars
                     logger.info(f"Bar {i+1}: {current_bar.timestamp}, evaluating signals...")
                 signal_result = self.signal_evaluator.evaluate_all_signals(
-                    current_bar, context
+                    current_bar, context, current_bar.timestamp
                 )
                 
                 # Debug log for Monday
@@ -297,6 +339,11 @@ class RunBacktestUseCase:
                     if signal_result.is_triggered:
                         logger.info(f"    Signal: {signal_result.signal_type}, Strike: {signal_result.strike_price}")
                 
+                if signal_result.is_triggered:
+                    logger.info(f"Signal detected: {signal_result.signal_type.value}")
+                    logger.info(f"Signals to test: {params.signals_to_test}")
+                    logger.info(f"Signal in test list: {signal_result.signal_type.value in params.signals_to_test}")
+                    
                 if signal_result.is_triggered and signal_result.signal_type.value in params.signals_to_test:
                     logger.info(f"SIGNAL TRIGGERED! Type: {signal_result.signal_type}, Strike: {signal_result.strike_price}")
                     # Open new trade
@@ -368,6 +415,12 @@ class RunBacktestUseCase:
     ) -> Optional[BacktestTrade]:
         """Open a new trade based on signal"""
         logger.info(f"_open_trade called for {signal_result.signal_type} at {current_bar.timestamp}")
+        
+        # Market hours validation if enabled
+        if self.market_calendar and not self.market_calendar.is_market_open(current_bar.timestamp):
+            logger.warning(f"Cannot open trade outside market hours: {current_bar.timestamp}")
+            return None
+            
         try:
             # Get expiry for current week
             expiry = self.context_manager.get_expiry_for_week(self.context_manager.current_week_start)
@@ -447,6 +500,50 @@ class RunBacktestUseCase:
                     logger.warning(f"No option price found for hedge position {hedge_strike} {option_type} at {current_bar.timestamp}")
                     return None  # Cannot create trade without hedge data when hedging is enabled
             
+            # Validate option prices if validator is enabled
+            if self.data_validator:
+                validation_result = self.data_validator.validate_option_price(
+                    timestamp=current_bar.timestamp,
+                    strike=main_strike,
+                    option_type=option_type,
+                    spot_price=current_bar.close,
+                    option_price=main_price
+                )
+                
+                if not validation_result.is_valid:
+                    logger.warning(f"Option price validation failed: {validation_result.error_message}")
+                    return None
+                
+            # Skip margin calculations and risk checks when risk management is disabled
+            # This matches the original backtest behavior
+            if self.enable_risk_management and self.margin_calculator and self.risk_manager:
+                # Calculate margin requirement
+                if params.use_hedging:
+                    margin_req = self.margin_calculator.get_margin_for_strategy(
+                        strategy_type=f"{'put' if option_type == 'PE' else 'call'}_spread",
+                        spot_price=current_bar.close,
+                        strikes={'main': main_strike, 'hedge': hedge_strike},
+                        lots=params.lots_to_trade
+                    )
+                else:
+                    margin_req = self.margin_calculator.get_margin_for_strategy(
+                        strategy_type=f"naked_{'put' if option_type == 'PE' else 'call'}",
+                        spot_price=current_bar.close,
+                        strikes={'main': main_strike},
+                        lots=params.lots_to_trade
+                    )
+                
+                # Calculate position value and potential loss
+                position_value = Decimal(str(main_price * params.lot_size * params.lots_to_trade))
+                stop_loss_distance = abs(actual_stop_loss - current_bar.close)
+                potential_loss = Decimal(str(stop_loss_distance * params.lot_size * params.lots_to_trade))
+                
+                # Risk management checks
+                logger.info(f"Margin check: Required={margin_req.total_margin}, Available={self.risk_manager.current_capital}")
+                if margin_req.total_margin > self.risk_manager.current_capital:
+                    logger.warning(f"Insufficient capital for margin. Required: {margin_req.total_margin}, Available: {self.risk_manager.current_capital}")
+                    return None
+            
             # Save trade to database first to get ID
             with self.db_manager.get_session() as session:
                 session.add(trade)
@@ -487,6 +584,9 @@ class RunBacktestUseCase:
                 trade = session.query(BacktestTrade).options(
                     joinedload(BacktestTrade.positions)
                 ).filter_by(id=trade.id).first()
+            
+            # In production, we would record position with risk manager
+            # For backtesting, we skip this to match original behavior
             
             logger.info(f"Opened trade: {signal_result.signal_type.value} at {current_bar.timestamp}")
             return trade
@@ -646,6 +746,9 @@ class RunBacktestUseCase:
         with self.db_manager.get_session() as session:
             session.merge(trade)
             session.commit()
+        
+        # In production, we would record position closure with risk manager
+        # For backtesting, we skip this to match original behavior
         
         logger.info(f"Closed trade: {trade.signal_type} - {outcome.value} - P&L: {total_pnl:.2f}")
         return total_pnl

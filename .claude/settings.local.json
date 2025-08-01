@@ -45,7 +45,13 @@
       "Bash(stop_all_apis.bat)",
       "Bash(tasklist:*)",
       "Bash(start python unified_api_correct.py)",
-      "Bash(pip search:*)"
+      "Bash(pip search:*)",
+      "Bash(rg:*)",
+      "Bash(run_and_test_api.bat)",
+      "Bash(cat:*)",
+      "Bash(kill_api.bat)",
+      "Bash(sc query:*)",
+      "Bash(where sqlcmd)"
     ],
     "deny": []
   }

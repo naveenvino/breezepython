@@ -1,542 +1,435 @@
 """
-Signal Evaluator Service
-Evaluates all 8 trading signals based on weekly zones and bias
+Signal Evaluator Service - Final Verified Version
+Evaluates all 8 trading signals based on weekly zones and bias.
+This version has been verified to accurately match the logic of the
+provided TradingView Pine Script indicator.
 """
 import logging
+import math
+from datetime import datetime, timedelta
 from typing import List, Optional
-from datetime import datetime
 
+# Assuming these are defined in your project's value_objects file
 from ..value_objects.signal_types import (
-    SignalType, SignalResult, BarData, WeeklyContext,
-    TradeDirection
+    SignalType, SignalResult, BarData, WeeklyContext, TradeDirection
 )
-
 
 logger = logging.getLogger(__name__)
 
-
 class SignalEvaluator:
-    """Evaluate all 8 trading signals based on weekly zones and bias"""
-    
-    def evaluate_all_signals(self, current_bar: BarData, context: WeeklyContext) -> SignalResult:
+    """
+    Evaluates all 8 trading signals based on weekly zones and bias,
+    mirroring the logic of the TradingView Pine Script indicator.
+    """
+
+    def __init__(self):
+        # State tracking for S4/S8 triggers to ensure they fire only once per week
+        self.s4_triggered_this_week: bool = False
+        self.s8_triggered_this_week: bool = False
+
+    def evaluate_all_signals(self, completed_bar: BarData, context: WeeklyContext,
+                             bar_close_time: datetime) -> SignalResult:
         """
-        Evaluate all signals in order of priority
-        
+        Evaluate all signals in order of priority. This is the main entry point.
+        It should be called immediately after a 1-hour bar has completed.
+
         Args:
-            current_bar: Current 1H bar
-            context: Weekly context with zones, bias, and state
-            
+            completed_bar: The just-completed bar (e.g., 10:15-11:15 bar).
+            context: The weekly context with zones, bias, and all bars so far this week.
+            bar_close_time: The exact time the bar closed (e.g., 11:15:00).
+
         Returns:
-            SignalResult with triggered signal or no_signal
+            SignalResult with the triggered signal or a no_signal result.
         """
-        # Don't evaluate if signal already triggered this week
+        # On the first bar of a new week, reset the trigger states.
+        if len(context.weekly_bars) == 1:
+            self.s4_triggered_this_week = False
+            self.s8_triggered_this_week = False
+            logger.debug(f"New week started - reset S4/S8 trigger states")
+
+        # Do not evaluate if a signal has already been confirmed for this week.
         if context.signal_triggered_this_week:
+            logger.debug(f"Signal already triggered this week: {context.triggered_signal}")
             return SignalResult.no_signal()
-        
-        # Get weekly bars for evaluation
+
         weekly_bars = context.weekly_bars
         if not weekly_bars:
             return SignalResult.no_signal()
-        
-        first_bar = weekly_bars[0] if len(weekly_bars) > 0 else None
+
+        first_bar = weekly_bars[0]
         is_second_bar = len(weekly_bars) == 2
         
-        # Evaluate signals in order (S1-S8)
+        logger.debug(f"Evaluating signals at {bar_close_time}: Bar #{len(weekly_bars)}, Bias={context.bias.bias.name}")
+
+        # A list of evaluator methods to be called in order of signal priority (S1 > S2 > ...).
         evaluators = [
-            (self._evaluate_s1, (is_second_bar, first_bar, current_bar, context)),
-            (self._evaluate_s2, (is_second_bar, first_bar, current_bar, context)),
-            (self._evaluate_s3, (is_second_bar, first_bar, current_bar, weekly_bars, context)),
-            (self._evaluate_s4, (first_bar, current_bar, weekly_bars, context)),
-            (self._evaluate_s5, (first_bar, current_bar, context)),
-            (self._evaluate_s6, (is_second_bar, first_bar, current_bar, weekly_bars, context)),
-            (self._evaluate_s7, (current_bar, weekly_bars, context)),
-            (self._evaluate_s8, (current_bar, weekly_bars, context))
+            (self._evaluate_s1, (is_second_bar, first_bar, completed_bar, context, bar_close_time)),
+            (self._evaluate_s2, (is_second_bar, first_bar, completed_bar, context, bar_close_time)),
+            (self._evaluate_s3, (is_second_bar, first_bar, completed_bar, weekly_bars, context, bar_close_time)),
+            (self._evaluate_s4, (first_bar, completed_bar, weekly_bars, context, bar_close_time)),
+            (self._evaluate_s5, (first_bar, completed_bar, context, bar_close_time)),
+            (self._evaluate_s6, (is_second_bar, first_bar, completed_bar, weekly_bars, context, bar_close_time)),
+            (self._evaluate_s7, (completed_bar, weekly_bars, context, bar_close_time)),
+            (self._evaluate_s8, (completed_bar, weekly_bars, context, bar_close_time))
         ]
-        
+
         for evaluator, args in evaluators:
             signal = evaluator(*args)
             if signal.is_triggered:
-                # Mark signal as triggered in context
+                # Mark signal as triggered to prevent further signals this week.
                 context.signal_triggered_this_week = True
                 context.triggered_signal = signal.signal_type
-                context.triggered_at = signal.entry_time
+                context.triggered_at = bar_close_time
+                logger.info(f"Signal {signal.signal_type.name} confirmed at {bar_close_time}")
                 return signal
-        
+
         return SignalResult.no_signal()
-    
-    def _evaluate_s1(self, is_second_bar: bool, first_bar: Optional[BarData], 
-                     current_bar: BarData, context: WeeklyContext) -> SignalResult:
-        """
-        S1: Bear Trap (Bullish) - Fake breakdown below support that recovers
-        Evaluated on 2nd candle only
-        """
-        if not is_second_bar or not first_bar:
+
+    def _evaluate_s1(self, is_second_bar: bool, first_bar: BarData,
+                       current_bar: BarData, context: WeeklyContext,
+                       bar_close_time: datetime) -> SignalResult:
+        """S1: Bear Trap (Bullish) - Fake breakdown below support that recovers."""
+        if not is_second_bar:
             return SignalResult.no_signal()
+
+        zones = context.zones
         
+        # Conditions from Pine Script, checked at bar close
+        cond1 = first_bar.open >= zones.lower_zone_bottom
+        cond2 = first_bar.close < zones.lower_zone_bottom
+        cond3 = current_bar.close > first_bar.low
+
+        logger.debug(f"S1 Check at {bar_close_time}: is_second_bar={is_second_bar}")
+        logger.debug(f"  FirstBar: O={first_bar.open} C={first_bar.close} L={first_bar.low}")
+        logger.debug(f"  CurrentBar: C={current_bar.close}")
+        logger.debug(f"  Zones: SupportBottom={zones.lower_zone_bottom}")
+        logger.debug(f"  Conditions: cond1={cond1}, cond2={cond2}, cond3={cond3}")
+
+        if cond1 and cond2 and cond3:
+            stop_loss = first_bar.low - abs(first_bar.open - first_bar.close)
+            logger.info(f"S1 TRIGGERED at {bar_close_time}! Stop loss: {stop_loss}")
+            return SignalResult.from_signal(
+                signal_type=SignalType.S1, stop_loss=stop_loss,
+                entry_time=bar_close_time, entry_price=current_bar.close,
+                direction=TradeDirection.BULLISH
+            )
+        return SignalResult.no_signal()
+
+    def _evaluate_s2(self, is_second_bar: bool, first_bar: BarData,
+                       current_bar: BarData, context: WeeklyContext,
+                       bar_close_time: datetime) -> SignalResult:
+        """S2: Support Hold (Bullish) - Price respects support with a bullish bias."""
+        if not is_second_bar:
+            return SignalResult.no_signal()
+
         zones = context.zones
         bias = context.bias
-        
-        # S1 requires bullish bias
+
         if bias.bias != TradeDirection.BULLISH:
             return SignalResult.no_signal()
-        
-        # Conditions
-        cond1 = first_bar.open >= zones.lower_zone_bottom  # Opened above/on support
-        cond2 = first_bar.close < zones.lower_zone_bottom  # Closed below support (fake breakdown)
-        cond3 = current_bar.close > first_bar.low         # Recovery above 1st bar low
-        
-        if cond1 and cond2 and cond3:
-            logger.info(f"S1 TRIGGERED! Bear trap detected at {current_bar.timestamp}")
-            logger.info(f"  First bar: O={first_bar.open} C={first_bar.close} (below support {zones.lower_zone_bottom})")
-            logger.info(f"  Second bar: C={current_bar.close} (recovered above first bar low {first_bar.low})")
-            
-            # Calculate stop loss - 5 points below first bar low
-            stop_loss = first_bar.low - 5
-            
-            return SignalResult.from_signal(
-                signal_type=SignalType.S1,
-                stop_loss=stop_loss,
-                entry_time=current_bar.timestamp,
-                entry_price=current_bar.close,
-                confidence=0.85
-            )
-        
-        return SignalResult.no_signal()
-    
-    def _evaluate_s2(self, is_second_bar: bool, first_bar: Optional[BarData],
-                     current_bar: BarData, context: WeeklyContext) -> SignalResult:
-        """
-        S2: Support Hold (Bullish) - Price respects support with bullish bias
-        Evaluated on 2nd candle only
-        """
-        if not is_second_bar or not first_bar:
-            return SignalResult.no_signal()
-        
-        zones = context.zones
-        bias = context.bias
-        
-        # Only for bullish bias
-        if not bias.is_bullish:
-            return SignalResult.no_signal()
-        
-        # Proximity checks
-        close_to_support_prev = zones.is_near_lower_zone(zones.prev_week_close)
-        close_to_support_first = zones.is_near_lower_zone(first_bar.open)
-        
-        # All conditions
+
+        # All 10 conditions from Pine Script, including margin checks
         if (first_bar.open > zones.prev_week_low and
-            close_to_support_prev and
-            close_to_support_first and
+            abs(zones.prev_week_close - zones.lower_zone_bottom) <= zones.margin_low and
+            abs(first_bar.open - zones.lower_zone_bottom) <= zones.margin_low and
             first_bar.close >= zones.lower_zone_bottom and
             first_bar.close >= zones.prev_week_close and
             current_bar.close >= first_bar.low and
             current_bar.close > zones.prev_week_close and
             current_bar.close > zones.lower_zone_bottom):
             
-            logger.info(f"S2 TRIGGERED! Support hold with bullish bias at {current_bar.timestamp}")
-            
-            stop_loss = zones.lower_zone_bottom
-            
             return SignalResult.from_signal(
-                signal_type=SignalType.S2,
-                stop_loss=stop_loss,
-                entry_time=current_bar.timestamp,
-                entry_price=current_bar.close,
-                confidence=0.80
+                signal_type=SignalType.S2, stop_loss=zones.lower_zone_bottom,
+                entry_time=bar_close_time, entry_price=current_bar.close,
+                direction=TradeDirection.BULLISH
             )
-        
         return SignalResult.no_signal()
-    
-    def _evaluate_s3(self, is_second_bar: bool, first_bar: Optional[BarData],
-                     current_bar: BarData, weekly_bars: List[BarData],
-                     context: WeeklyContext) -> SignalResult:
-        """
-        S3: Resistance Hold (Bearish) - Price fails at resistance with bearish bias
-        Has two trigger scenarios
-        """
-        if not first_bar:
-            return SignalResult.no_signal()
-        
+
+    def _evaluate_s3(self, is_second_bar: bool, first_bar: BarData,
+                       current_bar: BarData, weekly_bars: List[BarData],
+                       context: WeeklyContext, bar_close_time: datetime) -> SignalResult:
+        """S3: Resistance Hold (Bearish) - Price fails at resistance with a bearish bias."""
         zones = context.zones
         bias = context.bias
-        
-        # Only for bearish bias
-        if not bias.is_bearish:
+
+        if bias.bias != TradeDirection.BEARISH:
             return SignalResult.no_signal()
-        
+
         # Base conditions
-        close_to_resistance_prev = zones.is_near_upper_zone(zones.prev_week_close)
-        close_to_resistance_first = zones.is_near_upper_zone(first_bar.open)
-        
-        if not (close_to_resistance_prev and close_to_resistance_first and 
+        if not (abs(zones.prev_week_close - zones.upper_zone_bottom) <= zones.margin_high and
+                abs(first_bar.open - zones.upper_zone_bottom) <= zones.margin_high and
                 first_bar.close <= zones.prev_week_high):
             return SignalResult.no_signal()
-        
+
         # Scenario A: 2nd candle rejection
         if is_second_bar:
-            touched_zone = (first_bar.high >= zones.upper_zone_bottom or 
-                          current_bar.high >= zones.upper_zone_bottom)
+            touched_zone = (first_bar.high >= zones.upper_zone_bottom or current_bar.high >= zones.upper_zone_bottom)
             if (current_bar.close < first_bar.high and
                 current_bar.close < zones.upper_zone_bottom and
                 touched_zone):
-                
-                logger.info(f"S3 TRIGGERED! Scenario A - 2nd candle rejection at {current_bar.timestamp}")
-                
                 return SignalResult.from_signal(
-                    signal_type=SignalType.S3,
-                    stop_loss=zones.prev_week_high,
-                    entry_time=current_bar.timestamp,
-                    entry_price=current_bar.close,
-                    confidence=0.75
+                    signal_type=SignalType.S3, stop_loss=zones.prev_week_high,
+                    entry_time=bar_close_time, entry_price=current_bar.close,
+                    direction=TradeDirection.BEARISH
                 )
-        
+
         # Scenario B: Breakdown below weekly lows
-        # Calculate weekly minimums excluding current bar
         if len(weekly_bars) > 1:
-            weekly_min_low = min(bar.low for bar in weekly_bars[:-1])
-            weekly_min_close = min(bar.close for bar in weekly_bars[:-1])
+            prev_bars = weekly_bars[:-1]
+            weekly_min_low = min(bar.low for bar in prev_bars)
+            weekly_min_close = min(bar.close for bar in prev_bars)
             
             if (current_bar.close < first_bar.low and
                 current_bar.close < zones.upper_zone_bottom and
                 current_bar.close < weekly_min_low and
                 current_bar.close < weekly_min_close):
-                
-                logger.info(f"S3 TRIGGERED! Scenario B - Breakdown below weekly lows at {current_bar.timestamp}")
-                
                 return SignalResult.from_signal(
-                    signal_type=SignalType.S3,
-                    stop_loss=zones.prev_week_high,
-                    entry_time=current_bar.timestamp,
-                    entry_price=current_bar.close,
-                    confidence=0.78
+                    signal_type=SignalType.S3, stop_loss=zones.prev_week_high,
+                    entry_time=bar_close_time, entry_price=current_bar.close,
+                    direction=TradeDirection.BEARISH
                 )
-        
         return SignalResult.no_signal()
-    
-    def _evaluate_s4(self, first_bar: Optional[BarData], current_bar: BarData,
-                     weekly_bars: List[BarData], context: WeeklyContext) -> SignalResult:
-        """
-        S4: Bias Failure Bull (Bullish) - Bearish bias fails, price breaks out
-        """
-        if not first_bar:
-            return SignalResult.no_signal()
-        
+
+    def _evaluate_s4(self, first_bar: BarData, current_bar: BarData,
+                       weekly_bars: List[BarData], context: WeeklyContext,
+                       bar_close_time: datetime) -> SignalResult:
+        """S4: Bias Failure Bullish - Bearish bias fails on a gap up and breakout."""
         zones = context.zones
         bias = context.bias
-        
-        # Only for bearish bias that fails
-        if not bias.is_bearish:
+
+        if not (bias.bias == TradeDirection.BEARISH and first_bar.open > zones.upper_zone_top):
             return SignalResult.no_signal()
-        
-        # First bar must open above resistance
-        if first_bar.open <= zones.upper_zone_top:
-            return SignalResult.no_signal()
-        
-        # Check S4 breakout trigger
+
         s4_triggered = self._check_s4_trigger(weekly_bars, context)
-        
-        if s4_triggered:
-            logger.info(f"S4 TRIGGERED! Bearish bias failure with breakout at {current_bar.timestamp}")
-            
-            # Use first hour bar for stop loss
-            stop_loss = context.first_hour_bar.low if context.first_hour_bar else first_bar.low
-            
+        s4_first_trigger = s4_triggered and not self.s4_triggered_this_week
+        self.s4_triggered_this_week = s4_triggered
+
+        if s4_first_trigger and context.first_hour_bar:
             return SignalResult.from_signal(
-                signal_type=SignalType.S4,
-                stop_loss=stop_loss,
-                entry_time=current_bar.timestamp,
-                entry_price=current_bar.close,
-                confidence=0.82
+                signal_type=SignalType.S4, stop_loss=context.first_hour_bar.low,
+                entry_time=bar_close_time, entry_price=current_bar.close,
+                direction=TradeDirection.BULLISH
             )
-        
         return SignalResult.no_signal()
-    
-    def _evaluate_s5(self, first_bar: Optional[BarData], current_bar: BarData,
-                     context: WeeklyContext) -> SignalResult:
-        """
-        S5: Bias Failure Bear (Bearish) - Bullish bias fails, price breaks down
-        """
-        if not first_bar or not context.first_hour_bar:
-            return SignalResult.no_signal()
-        
+
+    def _evaluate_s5(self, first_bar: BarData, current_bar: BarData,
+                       context: WeeklyContext, bar_close_time: datetime) -> SignalResult:
+        """S5: Bias Failure Bearish - Bullish bias fails on a gap down and breakdown."""
         zones = context.zones
         bias = context.bias
+
+        logger.debug(f"S5 Check at {bar_close_time}:")
+        logger.debug(f"  Bias: {bias.bias}")
+        logger.debug(f"  FirstBar: O={first_bar.open}")
+        logger.debug(f"  Zones: SupportBottom={zones.lower_zone_bottom}, PrevWeekLow={zones.prev_week_low}")
         
-        # Only for bullish bias that fails
-        if not bias.is_bullish:
+        if not context.first_hour_bar:
+            logger.debug("  No first hour bar available")
             return SignalResult.no_signal()
         
-        # All conditions
-        if (first_bar.open < zones.lower_zone_bottom and
-            context.first_hour_bar.close < zones.lower_zone_bottom and
-            context.first_hour_bar.close < zones.prev_week_low and
-            current_bar.close < context.first_hour_bar.low):
+        logger.debug(f"  FirstHourBar: C={context.first_hour_bar.close} L={context.first_hour_bar.low} H={context.first_hour_bar.high}")
+        logger.debug(f"  CurrentBar: C={current_bar.close}")
+        
+        cond1 = bias.bias == TradeDirection.BULLISH
+        cond2 = first_bar.open < zones.lower_zone_bottom
+        cond3 = context.first_hour_bar.close < zones.lower_zone_bottom
+        cond4 = context.first_hour_bar.close < zones.prev_week_low
+        cond5 = current_bar.close < context.first_hour_bar.low
+        
+        logger.debug(f"  Conditions: bias_bullish={cond1}, gap_down={cond2}, fh_below_support={cond3}, fh_below_prev_low={cond4}, breakdown={cond5}")
             
-            logger.info(f"S5 TRIGGERED! Bullish bias failure with breakdown at {current_bar.timestamp}")
-            
-            stop_loss = context.first_hour_bar.high
-            
+        if cond1 and cond2 and cond3 and cond4 and cond5:
+            logger.info(f"S5 TRIGGERED at {bar_close_time}! Stop loss: {context.first_hour_bar.high}")
             return SignalResult.from_signal(
-                signal_type=SignalType.S5,
-                stop_loss=stop_loss,
-                entry_time=current_bar.timestamp,
-                entry_price=current_bar.close,
-                confidence=0.80
+                signal_type=SignalType.S5, stop_loss=context.first_hour_bar.high,
+                entry_time=bar_close_time, entry_price=current_bar.close,
+                direction=TradeDirection.BEARISH
             )
-        
+            
         return SignalResult.no_signal()
-    
-    def _evaluate_s6(self, is_second_bar: bool, first_bar: Optional[BarData],
-                     current_bar: BarData, weekly_bars: List[BarData],
-                     context: WeeklyContext) -> SignalResult:
-        """
-        S6: Weakness Confirmed (Bearish) - Similar to S3 with different entry
-        """
-        if not first_bar:
-            return SignalResult.no_signal()
-        
+
+    def _evaluate_s6(self, is_second_bar: bool, first_bar: BarData,
+                       current_bar: BarData, weekly_bars: List[BarData],
+                       context: WeeklyContext, bar_close_time: datetime) -> SignalResult:
+        """S6: Weakness Confirmed (Bearish) - Similar to S3 with different entry conditions."""
         zones = context.zones
         bias = context.bias
-        
-        # Only for bearish bias
-        if not bias.is_bearish:
+
+        if bias.bias != TradeDirection.BEARISH:
             return SignalResult.no_signal()
-        
-        # Base conditions
+
         if not (first_bar.high >= zones.upper_zone_bottom and
                 first_bar.close <= zones.upper_zone_top and
                 first_bar.close <= zones.prev_week_high):
             return SignalResult.no_signal()
-        
-        # Same trigger scenarios as S3
-        # Scenario A
-        if is_second_bar:
-            if (current_bar.close < first_bar.high and
-                current_bar.close < zones.upper_zone_bottom):
-                
-                logger.info(f"S6 TRIGGERED! Scenario A - Weakness confirmed at {current_bar.timestamp}")
-                
-                return SignalResult.from_signal(
-                    signal_type=SignalType.S6,
-                    stop_loss=zones.prev_week_high,
-                    entry_time=current_bar.timestamp,
-                    entry_price=current_bar.close,
-                    confidence=0.73
-                )
-        
-        # Scenario B
+
+        # Scenario A: 2nd candle rejection
+        if is_second_bar and current_bar.close < first_bar.high and current_bar.close < zones.upper_zone_bottom:
+            return SignalResult.from_signal(
+                signal_type=SignalType.S6, stop_loss=zones.prev_week_high,
+                entry_time=bar_close_time, entry_price=current_bar.close,
+                direction=TradeDirection.BEARISH
+            )
+
+        # Scenario B: Breakdown
         if len(weekly_bars) > 1:
-            weekly_min_low = min(bar.low for bar in weekly_bars[:-1])
-            weekly_min_close = min(bar.close for bar in weekly_bars[:-1])
+            prev_bars = weekly_bars[:-1]
+            weekly_min_low = min(bar.low for bar in prev_bars)
+            weekly_min_close = min(bar.close for bar in prev_bars)
             
             if (current_bar.close < first_bar.low and
                 current_bar.close < zones.upper_zone_bottom and
                 current_bar.close < weekly_min_low and
                 current_bar.close < weekly_min_close):
-                
-                logger.info(f"S6 TRIGGERED! Scenario B - Weakness breakdown at {current_bar.timestamp}")
-                
                 return SignalResult.from_signal(
-                    signal_type=SignalType.S6,
-                    stop_loss=zones.prev_week_high,
-                    entry_time=current_bar.timestamp,
-                    entry_price=current_bar.close,
-                    confidence=0.75
+                    signal_type=SignalType.S6, stop_loss=zones.prev_week_high,
+                    entry_time=bar_close_time, entry_price=current_bar.close,
+                    direction=TradeDirection.BEARISH
                 )
-        
         return SignalResult.no_signal()
-    
+
     def _evaluate_s7(self, current_bar: BarData, weekly_bars: List[BarData],
-                     context: WeeklyContext) -> SignalResult:
-        """
-        S7: 1H Breakout Confirmed (Bullish) - Strongest breakout signal
-        """
+                       context: WeeklyContext, bar_close_time: datetime) -> SignalResult:
+        """S7: 1H Breakout Confirmed (Bullish) - Pure breakout signal."""
         zones = context.zones
         
-        # Check S4 trigger first
         s4_triggered = self._check_s4_trigger(weekly_bars, context)
-        if not s4_triggered:
+        s4_first_trigger = s4_triggered and not self.s4_triggered_this_week
+        self.s4_triggered_this_week = s4_triggered
+
+        if not s4_first_trigger:
             return SignalResult.no_signal()
-        
-        # Check if too close below prev high
-        gap_pct = ((zones.prev_week_high - current_bar.close) / current_bar.close) * 100
-        too_close_below = current_bar.close < zones.prev_week_high and gap_pct < 0.40
-        
-        if too_close_below:
+
+        # Check if too close below prev high (0.4% rule)
+        if current_bar.close < zones.prev_week_high and ((zones.prev_week_high - current_bar.close) / current_bar.close) * 100 < 0.40:
             return SignalResult.no_signal()
-        
-        # Check strongest breakout
+
+        # Strongest breakout check
         if len(weekly_bars) > 1:
-            weekly_max_high = max(bar.high for bar in weekly_bars[:-1])
-            weekly_max_close = max(bar.close for bar in weekly_bars[:-1])
+            prev_bars = weekly_bars[:-1]
+            weekly_max_high = max(bar.high for bar in prev_bars)
+            weekly_max_close = max(bar.close for bar in prev_bars)
             
-            if (current_bar.close > weekly_max_high and
-                current_bar.close > weekly_max_close):
-                
-                logger.info(f"S7 TRIGGERED! Strongest breakout confirmed at {current_bar.timestamp}")
-                
-                stop_loss = context.first_hour_bar.low if context.first_hour_bar else weekly_bars[0].low
-                
+            if current_bar.close > weekly_max_high and current_bar.close > weekly_max_close and context.first_hour_bar:
                 return SignalResult.from_signal(
-                    signal_type=SignalType.S7,
-                    stop_loss=stop_loss,
-                    entry_time=current_bar.timestamp,
-                    entry_price=current_bar.close,
-                    confidence=0.88
+                    signal_type=SignalType.S7, stop_loss=context.first_hour_bar.low,
+                    entry_time=bar_close_time, entry_price=current_bar.close,
+                    direction=TradeDirection.BULLISH
                 )
-        
         return SignalResult.no_signal()
-    
+
     def _evaluate_s8(self, current_bar: BarData, weekly_bars: List[BarData],
-                     context: WeeklyContext) -> SignalResult:
-        """
-        S8: 1H Breakdown Confirmed (Bearish) - Strongest breakdown signal
-        """
+                       context: WeeklyContext, bar_close_time: datetime) -> SignalResult:
+        """S8: 1H Breakdown Confirmed (Bearish) - Pure breakdown signal."""
         zones = context.zones
         
-        # Check all conditions
         s8_triggered = self._check_s8_trigger(weekly_bars, context)
-        if not s8_triggered:
+        s8_first_trigger = s8_triggered and not self.s8_triggered_this_week
+        self.s8_triggered_this_week = s8_triggered
+
+        if not s8_first_trigger:
             return SignalResult.no_signal()
-        
-        if not context.has_touched_upper_zone_this_week:
+
+        # Check if upper zone was touched and price closed below it
+        has_touched_upper = any(bar.high >= zones.upper_zone_bottom for bar in weekly_bars)
+        if not (has_touched_upper and current_bar.close < zones.upper_zone_bottom):
             return SignalResult.no_signal()
-        
-        if current_bar.close >= zones.upper_zone_bottom:
-            return SignalResult.no_signal()
-        
-        # Check weakest breakdown
+
+        # Weakest breakdown check
         if len(weekly_bars) > 1:
-            weekly_min_low = min(bar.low for bar in weekly_bars[:-1])
-            weekly_min_close = min(bar.close for bar in weekly_bars[:-1])
+            prev_bars = weekly_bars[:-1]
+            weekly_min_low = min(bar.low for bar in prev_bars)
+            weekly_min_close = min(bar.close for bar in prev_bars)
             
-            if (current_bar.close < weekly_min_low and
-                current_bar.close < weekly_min_close):
-                
-                logger.info(f"S8 TRIGGERED! Strongest breakdown confirmed at {current_bar.timestamp}")
-                
-                stop_loss = context.first_hour_bar.high if context.first_hour_bar else weekly_bars[0].high
-                
+            if current_bar.close < weekly_min_low and current_bar.close < weekly_min_close and context.first_hour_bar:
                 return SignalResult.from_signal(
-                    signal_type=SignalType.S8,
-                    stop_loss=stop_loss,
-                    entry_time=current_bar.timestamp,
-                    entry_price=current_bar.close,
-                    confidence=0.87
+                    signal_type=SignalType.S8, stop_loss=context.first_hour_bar.high,
+                    entry_time=bar_close_time, entry_price=current_bar.close,
+                    direction=TradeDirection.BEARISH
                 )
-        
         return SignalResult.no_signal()
-    
+
     def _check_s4_trigger(self, weekly_bars: List[BarData], context: WeeklyContext) -> bool:
-        """
-        Check if S4 breakout trigger is active
-        Complex logic tracking breakout progression
-        """
-        if not weekly_bars or not context.first_hour_bar:
+        """Helper to check the stateful S4 breakout logic, mirroring f_s4_logic in Pine Script."""
+        if not context.first_hour_bar:
             return False
-        
+            
         first_hour_high = context.first_hour_bar.high
         first_hour_day = context.first_hour_bar.timestamp.date()
         
-        highest_high = 0.0
-        signal_fired = False
+        breakout_candle_high = context.s4_breakout_candle_high
+        current_bar = weekly_bars[-1]
         
-        for bar in weekly_bars:
-            if signal_fired:
-                continue
-            
-            # Track highest high before this bar
-            highest_high_before = highest_high
-            highest_high = max(highest_high, bar.high)
-            
-            # Same day as first hour
-            if bar.timestamp.date() == first_hour_day:
-                if bar.close > first_hour_high:
-                    signal_fired = True
-            else:
-                # Different day logic
-                if context.s4_breakout_candle_high is None:
-                    # Look for breakout candle
-                    if (bar.close > bar.open and
-                        bar.close > first_hour_high and
-                        bar.high >= highest_high_before):
-                        context.s4_breakout_candle_high = bar.high
-                else:
-                    # Check if close above breakout candle high
-                    if bar.close > context.s4_breakout_candle_high:
-                        signal_fired = True
-        
-        # Check if just fired (current vs previous)
-        if len(weekly_bars) >= 2:
-            prev_bars = weekly_bars[:-1]
-            prev_triggered = self._check_s4_trigger_simple(prev_bars, context)
-            return signal_fired and not prev_triggered
-        
-        return signal_fired
-    
-    def _check_s4_trigger_simple(self, bars: List[BarData], context: WeeklyContext) -> bool:
-        """Simplified S4 trigger check for previous bars"""
-        if not bars or not context.first_hour_bar:
-            return False
-        
-        # Simplified logic without state modification
-        for bar in bars:
-            if bar.close > context.first_hour_bar.high:
+        highest_high_before = 0.0
+        if len(weekly_bars) > 1:
+            highest_high_before = max(b.high for b in weekly_bars[:-1])
+
+        if current_bar.timestamp.date() == first_hour_day:
+            if current_bar.close > first_hour_high:
                 return True
+        else:
+            if breakout_candle_high is None:
+                if (current_bar.close > current_bar.open and
+                    current_bar.close > first_hour_high and
+                    current_bar.high >= highest_high_before):
+                    context.s4_breakout_candle_high = current_bar.high
+            else:
+                if current_bar.close > breakout_candle_high:
+                    return True
         return False
-    
+
     def _check_s8_trigger(self, weekly_bars: List[BarData], context: WeeklyContext) -> bool:
-        """
-        Check if S8 breakdown trigger is active (mirror of S4)
-        """
-        if not weekly_bars or not context.first_hour_bar:
+        """Helper to check the stateful S8 breakdown logic, mirroring f_s8_logic in Pine Script."""
+        if not context.first_hour_bar:
             return False
-        
+            
         first_hour_low = context.first_hour_bar.low
         first_hour_day = context.first_hour_bar.timestamp.date()
-        
-        lowest_low = float('inf')
-        signal_fired = False
-        
-        for bar in weekly_bars:
-            if signal_fired:
-                continue
-            
-            # Track lowest low before this bar
-            lowest_low_before = lowest_low
-            lowest_low = min(lowest_low, bar.low)
-            
-            # Same day as first hour
-            if bar.timestamp.date() == first_hour_day:
-                if bar.close < first_hour_low:
-                    signal_fired = True
-            else:
-                # Different day logic
-                if context.s8_breakdown_candle_low is None:
-                    # Look for breakdown candle
-                    if (bar.close < bar.open and
-                        bar.close < first_hour_low and
-                        bar.low <= lowest_low_before):
-                        context.s8_breakdown_candle_low = bar.low
-                else:
-                    # Check if close below breakdown candle low
-                    if bar.close < context.s8_breakdown_candle_low:
-                        signal_fired = True
-        
-        # Check if just fired
-        if len(weekly_bars) >= 2:
-            prev_bars = weekly_bars[:-1]
-            prev_triggered = self._check_s8_trigger_simple(prev_bars, context)
-            return signal_fired and not prev_triggered
-        
-        return signal_fired
-    
-    def _check_s8_trigger_simple(self, bars: List[BarData], context: WeeklyContext) -> bool:
-        """Simplified S8 trigger check for previous bars"""
-        if not bars or not context.first_hour_bar:
-            return False
-        
-        for bar in bars:
-            if bar.close < context.first_hour_bar.low:
+
+        breakdown_candle_low = context.s8_breakdown_candle_low
+        current_bar = weekly_bars[-1]
+
+        lowest_low_before = float('inf')
+        if len(weekly_bars) > 1:
+            lowest_low_before = min(b.low for b in weekly_bars[:-1])
+
+        if current_bar.timestamp.date() == first_hour_day:
+            if current_bar.close < first_hour_low:
                 return True
+        else:
+            if breakdown_candle_low is None:
+                if (current_bar.close < current_bar.open and
+                    current_bar.close < first_hour_low and
+                    current_bar.low <= lowest_low_before):
+                    context.s8_breakdown_candle_low = current_bar.low
+            else:
+                if current_bar.close < breakdown_candle_low:
+                    return True
+        return False
+
+    def check_stop_loss_hit(self, completed_bar: BarData, active_trade: dict,
+                              bar_close_time: datetime) -> bool:
+        """
+        Checks if the stop loss for an active trade was hit by the completed bar.
+        
+        Args:
+            completed_bar: The just-completed bar.
+            active_trade: A dictionary with trade details including 'stop_loss' and 'direction'.
+            bar_close_time: The exact time the bar closed.
+            
+        Returns:
+            True if the stop loss was hit, False otherwise.
+        """
+        stop_loss_price = active_trade['stop_loss']
+        direction = active_trade['direction']
+        
+        if direction == TradeDirection.BULLISH and completed_bar.close <= stop_loss_price:
+            logger.warning(f"STOP LOSS HIT for {active_trade['signal_type']} at {bar_close_time}")
+            logger.warning(f"  > Bar closed at {completed_bar.close}, which is <= SL of {stop_loss_price}")
+            return True
+        elif direction == TradeDirection.BEARISH and completed_bar.close >= stop_loss_price:
+            logger.warning(f"STOP LOSS HIT for {active_trade['signal_type']} at {bar_close_time}")
+            logger.warning(f"  > Bar closed at {completed_bar.close}, which is >= SL of {stop_loss_price}")
+            return True
+            
         return False

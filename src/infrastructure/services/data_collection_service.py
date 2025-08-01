@@ -8,7 +8,10 @@ from typing import List, Optional, Dict, Tuple
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, func
 
-from ..database.models import NiftyIndexData, OptionsHistoricalData
+from ..database.models import (
+    NiftyIndexData, OptionsHistoricalData, NiftyIndexDataHourly, 
+    NiftyIndexData5Minute, get_nifty_model_for_timeframe
+)
 from ..database.database_manager import get_db_manager
 from .breeze_service import BreezeService
 from .hourly_aggregation_service import HourlyAggregationService
@@ -159,15 +162,14 @@ class DataCollectionService:
         missing_ranges = []
         
         with self.db_manager.get_session() as session:
-            # Get existing data timestamps
-            existing = session.query(NiftyIndexData.timestamp).filter(
+            # Get existing data timestamps from 5-minute table
+            existing = session.query(NiftyIndexData5Minute.timestamp).filter(
                 and_(
-                    NiftyIndexData.symbol == symbol,
-                    NiftyIndexData.timestamp >= from_date,
-                    NiftyIndexData.timestamp <= to_date,
-                    NiftyIndexData.interval == "5minute"
+                    NiftyIndexData5Minute.symbol == symbol,
+                    NiftyIndexData5Minute.timestamp >= from_date,
+                    NiftyIndexData5Minute.timestamp <= to_date
                 )
-            ).order_by(NiftyIndexData.timestamp).all()
+            ).order_by(NiftyIndexData5Minute.timestamp).all()
             
             existing_timestamps = {row[0] for row in existing}
             
@@ -281,34 +283,45 @@ class DataCollectionService:
         option_type: str,
         expiry: datetime,
         from_date: datetime,
-        to_date: datetime
+        to_date: datetime,
+        interval: str = "1hour"
     ) -> int:
         """Fetch and store option data"""
         try:
+            # First check if data already exists
+            if await self._check_option_data_exists(strike, option_type, expiry, from_date, to_date):
+                logger.info(f"Option data already exists for {strike}{option_type} expiry {expiry.date()}")
+                return 0  # No new records added
+            
             # Generate stock code for option
             expiry_str = expiry.strftime("%y%b").upper()  # e.g., "24JAN"
             stock_code = f"NIFTY{expiry_str}{strike}{option_type}"
             
-            logger.info(f"Fetching option data for {stock_code}")
+            logger.info(f"Fetching option data for {stock_code} with {interval} interval")
             
-            # Fetch from Breeze
+            # Fetch from Breeze with proper option parameters
             data = await self.breeze_service.get_historical_data(
-                interval="1hour",
+                interval=interval,
                 from_date=from_date,
                 to_date=to_date,
-                stock_code=stock_code,
+                stock_code="NIFTY",  # Just the underlying symbol
                 exchange_code="NFO",
                 product_type="options",
-                expiry_date=expiry.strftime("%Y-%m-%dT07:00:00.000Z"),
-                right=option_type,
-                strike_price=str(strike)
+                strike_price=str(strike),
+                right="Put" if option_type == "PE" else "Call",
+                expiry_date=expiry
             )
             
             if data and 'Success' in data:
                 records = data['Success']
-                return await self._store_option_data(records)
+                logger.info(f"Got {len(records)} records for {stock_code}")
+                if records:
+                    return await self._store_option_data(records)
+                else:
+                    logger.warning(f"Empty Success array for {stock_code}")
+                    return 0
             else:
-                logger.warning(f"No option data returned for {stock_code}")
+                logger.warning(f"No option data returned for {stock_code}. Response: {data}")
                 return 0
                 
         except Exception as e:
@@ -352,18 +365,21 @@ class DataCollectionService:
         self,
         from_date: datetime,
         to_date: datetime,
-        symbol: str = "NIFTY"
-    ) -> List[NiftyIndexData]:
-        """Get NIFTY data from database - HOURLY DATA ONLY for backtesting"""
+        symbol: str = "NIFTY",
+        timeframe: str = "hourly"
+    ) -> List:
+        """Get NIFTY data from database for specified timeframe"""
+        # Get the appropriate model class
+        model_class = get_nifty_model_for_timeframe(timeframe)
+        
         with self.db_manager.get_session() as session:
-            return session.query(NiftyIndexData).filter(
+            return session.query(model_class).filter(
                 and_(
-                    NiftyIndexData.symbol == symbol,
-                    NiftyIndexData.timestamp >= from_date,
-                    NiftyIndexData.timestamp <= to_date,
-                    NiftyIndexData.interval == 'hourly'  # Only get hourly data for signals
+                    model_class.symbol == symbol,
+                    model_class.timestamp >= from_date,
+                    model_class.timestamp <= to_date
                 )
-            ).order_by(NiftyIndexData.timestamp).all()
+            ).order_by(model_class.timestamp).all()
     
     async def get_option_data(
         self,
@@ -387,8 +403,9 @@ class DataCollectionService:
                 )
             ).order_by(OptionsHistoricalData.timestamp).first()
             
-            # If not found and expiry time is 15:30, try with 05:30
+            # If not found and expiry time is 15:30, try with 05:30 and 00:00
             if not result and expiry.hour == 15 and expiry.minute == 30:
+                # Try 05:30
                 expiry_with_db_time = expiry.replace(hour=5, minute=30)
                 result = session.query(OptionsHistoricalData).filter(
                     and_(
@@ -399,6 +416,19 @@ class DataCollectionService:
                         OptionsHistoricalData.timestamp <= timestamp + timedelta(hours=1)
                     )
                 ).order_by(OptionsHistoricalData.timestamp).first()
+                
+                # If still not found, try 00:00 (midnight)
+                if not result:
+                    expiry_midnight = expiry.replace(hour=0, minute=0)
+                    result = session.query(OptionsHistoricalData).filter(
+                        and_(
+                            OptionsHistoricalData.strike == strike,
+                            OptionsHistoricalData.option_type == option_type,
+                            OptionsHistoricalData.expiry_date == expiry_midnight,
+                            OptionsHistoricalData.timestamp >= timestamp - timedelta(hours=1),
+                            OptionsHistoricalData.timestamp <= timestamp + timedelta(hours=1)
+                        )
+                    ).order_by(OptionsHistoricalData.timestamp).first()
             
             return result
     
@@ -448,7 +478,7 @@ class DataCollectionService:
         logger.info(f"Creating hourly candles from {from_date} to {to_date}")
         
         # Get all 5-minute data for the date range
-        five_min_data = await self.get_nifty_data(from_date, to_date, symbol)
+        five_min_data = await self.get_nifty_data(from_date, to_date, symbol, timeframe="5minute")
         
         if not five_min_data:
             logger.warning("No 5-minute data found to aggregate")

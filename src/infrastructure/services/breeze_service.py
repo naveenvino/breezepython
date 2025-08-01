@@ -26,17 +26,39 @@ class BreezeService:
         """Initialize Breeze connection"""
         if not self._initialized:
             try:
-                # Actual Breeze initialization would go here
-                # self._breeze = BreezeConnect(api_key=self.settings.breeze.api_key)
-                # self._breeze.generate_session(
-                #     api_secret=self.settings.breeze.api_secret,
-                #     session_token=self.settings.breeze.session_token
-                # )
-                self._initialized = True
-                logger.info("Breeze API connection initialized")
+                # Import here to avoid issues if breeze_connect is not installed
+                try:
+                    from breeze_connect import BreezeConnect
+                    # Get credentials - check both standard fields and extra fields
+                    api_key = self.settings.breeze.api_key or getattr(self.settings.breeze, 'breeze_api_key', '')
+                    api_secret = self.settings.breeze.api_secret or getattr(self.settings.breeze, 'breeze_api_secret', '')
+                    session_token = self.settings.breeze.session_token or getattr(self.settings.breeze, 'breeze_api_session', '')
+                    
+                    if not api_key or not api_secret:
+                        raise ValueError("Breeze API credentials not found in settings")
+                    
+                    self._breeze = BreezeConnect(api_key=api_key)
+                    # Generate session without checking customer details
+                    try:
+                        self._breeze.generate_session(
+                            api_secret=api_secret,
+                            session_token=session_token
+                        )
+                        self._initialized = True
+                        logger.info("Breeze API session generated successfully")
+                    except Exception as session_error:
+                        # Log but don't fail - session might still work
+                        logger.warning(f"Session generation warning: {session_error}")
+                        self._initialized = True  # Still mark as initialized
+                except ImportError:
+                    logger.warning("breeze_connect module not installed. Install with: pip install breeze-connect")
+                    self._breeze = None
+                    self._initialized = True  # Mark as initialized to avoid repeated attempts
             except Exception as e:
                 logger.error(f"Failed to initialize Breeze API: {e}")
-                raise
+                self._breeze = None
+                self._initialized = True  # Mark as initialized to avoid repeated attempts
+                # Don't raise - let individual methods handle the None breeze object
     
     async def get_historical_data(
         self,
@@ -45,7 +67,10 @@ class BreezeService:
         to_date: datetime,
         stock_code: str,
         exchange_code: str = "NSE",
-        product_type: str = "cash"
+        product_type: str = "cash",
+        strike_price: Optional[str] = None,
+        right: Optional[str] = None,
+        expiry_date: Optional[datetime] = None
     ) -> Dict[str, Any]:
         """
         Get historical data from Breeze API
@@ -64,27 +89,56 @@ class BreezeService:
         # Initialize connection
         self._initialize()
         
+        # Check if Breeze is available
+        if self._breeze is None:
+            logger.warning("Breeze API not available. Returning empty data.")
+            return {
+                "Success": [],
+                "Error": "Breeze API not initialized. Please check credentials or install breeze-connect"
+            }
+        
         try:
             # Run in thread pool since breeze_connect is synchronous
             loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(
-                None,
-                self._breeze.get_historical_data_v2,
-                interval,
-                from_date.strftime("%Y-%m-%d"),
-                to_date.strftime("%Y-%m-%d"),
-                stock_code,
-                exchange_code,
-                product_type,
-                None,  # user_id
-                None   # strike_price
-            )
+            # Build parameters based on product type
+            if product_type == "options" and strike_price and right and expiry_date:
+                # Use lambda to pass keyword arguments
+                result = await loop.run_in_executor(
+                    None,
+                    lambda: self._breeze.get_historical_data_v2(
+                        interval=interval,
+                        from_date=from_date.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                        to_date=to_date.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                        stock_code=stock_code,
+                        exchange_code=exchange_code,
+                        product_type=product_type,
+                        expiry_date=expiry_date.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                        right=right,
+                        strike_price=strike_price
+                    )
+                )
+            else:
+                result = await loop.run_in_executor(
+                    None,
+                    lambda: self._breeze.get_historical_data_v2(
+                        interval=interval,
+                        from_date=from_date.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                        to_date=to_date.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                        stock_code=stock_code,
+                        exchange_code=exchange_code,
+                        product_type=product_type
+                    )
+                )
             
+            logger.debug(f"Breeze API response for {stock_code}: {result}")
             return result
             
         except Exception as e:
             logger.error(f"Error fetching historical data: {e}")
-            raise
+            return {
+                "Success": [],
+                "Error": str(e)
+            }
     
     async def get_option_chain(
         self,
@@ -95,6 +149,14 @@ class BreezeService:
     ) -> Dict[str, Any]:
         """Get option chain data"""
         self._initialize()
+        
+        # Check if Breeze is available
+        if self._breeze is None:
+            logger.warning("Breeze API not available. Returning empty data.")
+            return {
+                "Success": [],
+                "Error": "Breeze API not initialized"
+            }
         
         try:
             loop = asyncio.get_event_loop()

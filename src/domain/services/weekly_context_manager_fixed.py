@@ -1,6 +1,6 @@
 """
-Weekly Context Manager
-Manages weekly zones, bias calculation, and context for signal evaluation
+Weekly Context Manager - FIXED VERSION
+Corrects the 4-hour body calculation for Indian market hours
 """
 import logging
 from datetime import datetime, timedelta
@@ -29,21 +29,13 @@ class WeeklyContextManager:
         self.current_week_start: Optional[datetime] = None
     
     def get_week_start(self, date: datetime) -> datetime:
-        """Get Sunday 9:15 AM IST for the week containing the date (matching TradingView/SP logic)"""
-        # Get current day of week (Monday=0, Sunday=6)
-        current_weekday = date.weekday()
+        """Get Monday 9:15 AM IST for the week containing the date"""
+        # Monday is 0, Sunday is 6
+        days_since_monday = date.weekday()
+        monday = date - timedelta(days=days_since_monday)
         
-        # Calculate days to subtract to get to previous Sunday
-        # If Sunday (6), days_to_subtract = 0
-        # If Monday (0), days_to_subtract = 1
-        # If Tuesday (1), days_to_subtract = 2, etc.
-        days_to_subtract = (current_weekday + 1) % 7
-        
-        # Get Sunday of current week
-        sunday = date - timedelta(days=days_to_subtract)
-        
-        # Return Sunday 9:15 AM IST
-        return sunday.replace(hour=9, minute=15, second=0, microsecond=0)
+        # Return Monday 9:15 AM IST
+        return monday.replace(hour=9, minute=15, second=0, microsecond=0)
     
     def is_new_week(self, timestamp: datetime) -> bool:
         """Check if timestamp is in a new week"""
@@ -77,38 +69,15 @@ class WeeklyContextManager:
         prev_week_low = df['low'].min()
         prev_week_close = df['close'].iloc[-1]
         
-        # Calculate 4-hour body extremes
-        # Since we have hourly data from 5-min aggregation, 
-        # we need to group into 4-hour blocks
-        
-        # Create 4-hour groups (0-3, 4-7, 8-11, 12-15, 16-19, 20-23)
-        df['4h_group'] = (df['timestamp'].dt.hour // 4) * 4
-        df['date'] = df['timestamp'].dt.date
-        df['4h_key'] = df['date'].astype(str) + '_' + df['4h_group'].astype(str)
-        
-        # For each 4-hour group, find the body extremes
-        four_hour_bodies = []
-        for group_key, group_df in df.groupby('4h_key'):
-            if len(group_df) > 0:
-                # Get OHLC for this 4-hour period
-                group_open = group_df.iloc[0]['open']
-                group_close = group_df.iloc[-1]['close']
-                
-                # Body top and bottom for this 4-hour candle
-                body_top = max(group_open, group_close)
-                body_bottom = min(group_open, group_close)
-                
-                four_hour_bodies.append({
-                    'body_top': body_top,
-                    'body_bottom': body_bottom
-                })
+        # Calculate 4-hour body extremes - FIXED for Indian market hours
+        four_hour_bodies = self._calculate_4h_bodies_indian_market(df)
         
         # Get max/min body levels across all 4-hour candles
         if four_hour_bodies:
             prev_max_4h_body = max(b['body_top'] for b in four_hour_bodies)
             prev_min_4h_body = min(b['body_bottom'] for b in four_hour_bodies)
         else:
-            # Fallback to hourly data if grouping fails
+            # Fallback to hourly data if no 4H candles found
             df['body_top'] = df[['open', 'close']].max(axis=1)
             df['body_bottom'] = df[['open', 'close']].min(axis=1)
             prev_max_4h_body = df['body_top'].max()
@@ -130,8 +99,84 @@ class WeeklyContextManager:
         
         logger.info(f"Calculated weekly zones - Upper: {zones.upper_zone_bottom:.2f}-{zones.upper_zone_top:.2f}, "
                    f"Lower: {zones.lower_zone_bottom:.2f}-{zones.lower_zone_top:.2f}")
+        logger.info(f"4H Bodies - Max: {prev_max_4h_body:.2f}, Min: {prev_min_4h_body:.2f}")
         
         return zones
+    
+    def _calculate_4h_bodies_indian_market(self, df: pd.DataFrame) -> List[dict]:
+        """
+        Calculate 4-hour candle bodies for Indian market hours
+        
+        Indian market hours: 9:15 AM - 3:30 PM
+        Period 1: 9:15 AM - 1:15 PM (4 hours)
+        Period 2: 1:15 PM - 3:30 PM (2.25 hours)
+        
+        Args:
+            df: DataFrame with timestamp, open, high, low, close columns
+            
+        Returns:
+            List of dictionaries with body_top and body_bottom
+        """
+        four_hour_bodies = []
+        
+        # Process each trading day
+        for date in df['timestamp'].dt.date.unique():
+            day_data = df[df['timestamp'].dt.date == date].copy()
+            day_data = day_data.sort_values('timestamp')
+            
+            # Period 1: 9:15 AM - 1:15 PM
+            period1_start = pd.to_datetime(f"{date} 09:15:00")
+            period1_end = pd.to_datetime(f"{date} 13:15:00")
+            
+            period1 = day_data[
+                (day_data['timestamp'] >= period1_start) &
+                (day_data['timestamp'] < period1_end)
+            ]
+            
+            if not period1.empty:
+                # 4H candle: first hour's open, last hour's close
+                open_4h = period1.iloc[0]['open']
+                close_4h = period1.iloc[-1]['close']
+                high_4h = period1['high'].max()
+                low_4h = period1['low'].min()
+                
+                logger.debug(f"Period 1 ({date} 9:15-13:15): O={open_4h:.2f}, H={high_4h:.2f}, L={low_4h:.2f}, C={close_4h:.2f}")
+                
+                four_hour_bodies.append({
+                    'body_top': max(open_4h, close_4h),
+                    'body_bottom': min(open_4h, close_4h),
+                    'high': high_4h,
+                    'low': low_4h
+                })
+            
+            # Period 2: 1:15 PM - 3:30 PM
+            period2_start = pd.to_datetime(f"{date} 13:15:00")
+            period2_end = pd.to_datetime(f"{date} 15:30:00")
+            
+            period2 = day_data[
+                (day_data['timestamp'] >= period2_start) &
+                (day_data['timestamp'] <= period2_end)
+            ]
+            
+            if not period2.empty:
+                # 4H candle: first hour's open, last hour's close
+                open_4h = period2.iloc[0]['open']
+                close_4h = period2.iloc[-1]['close']
+                high_4h = period2['high'].max()
+                low_4h = period2['low'].min()
+                
+                logger.debug(f"Period 2 ({date} 13:15-15:30): O={open_4h:.2f}, H={high_4h:.2f}, L={low_4h:.2f}, C={close_4h:.2f}")
+                
+                four_hour_bodies.append({
+                    'body_top': max(open_4h, close_4h),
+                    'body_bottom': min(open_4h, close_4h),
+                    'high': high_4h,
+                    'low': low_4h
+                })
+        
+        logger.info(f"Calculated {len(four_hour_bodies)} 4-hour candles from {len(df)} hourly bars")
+        
+        return four_hour_bodies
     
     def calculate_weekly_bias(self, zones: WeeklyZones, current_price: float) -> WeeklyBias:
         """
@@ -209,12 +254,13 @@ class WeeklyContextManager:
         
         # Set first hour bar if not set
         if self.current_context.first_hour_bar is None:
-            # Set the first bar of the week as the first hour bar
-            # This handles cases where Monday data might be missing
-            if len(self.current_context.weekly_bars) == 1:
-                # This is the first bar we've seen this week
+            # Check if this is the first bar of the week (Monday 9:15-10:15 IST)
+            # Now timestamps are already in IST
+            if (current_bar.timestamp.weekday() == 0 and  # Monday
+                current_bar.timestamp.hour == 9):  # 9:XX AM hour
+                # This is the first hour of Monday (9:15-10:15 AM IST)
                 self.current_context.first_hour_bar = current_bar
-                logger.info(f"Set first hour bar: O={current_bar.open} H={current_bar.high} L={current_bar.low} C={current_bar.close} at {current_bar.timestamp}")
+                logger.info(f"Set first hour bar: {current_bar} at {current_bar.timestamp}")
         
         return self.current_context
     
@@ -238,9 +284,9 @@ class WeeklyContextManager:
         
         # Previous week is 7 days before
         prev_week_start = current_week_start - timedelta(days=7)
-        # Previous week ends on Friday 15:30
-        # With Sunday as week start, Friday is 5 days later
-        friday = prev_week_start + timedelta(days=5)  # Sunday + 5 = Friday
+        # Previous week ends on Friday 15:30 (not Sunday night)
+        # So we need to find Friday of previous week
+        friday = prev_week_start + timedelta(days=4)  # Monday + 4 = Friday
         prev_week_end = friday.replace(hour=15, minute=30, second=0)
         
         # Filter data for previous week
@@ -286,6 +332,6 @@ class WeeklyContextManager:
     
     def get_expiry_for_week(self, week_start: datetime) -> datetime:
         """Get expiry date for a given week (Thursday 3:30 PM)"""
-        # Week starts on Sunday, expiry is on Thursday
-        expiry = week_start + timedelta(days=4)  # Sunday + 4 = Thursday
+        # Week starts on Monday, expiry is on Thursday
+        expiry = week_start + timedelta(days=3)  # Monday + 3 = Thursday
         return expiry.replace(hour=15, minute=30, second=0, microsecond=0)

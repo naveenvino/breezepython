@@ -1,6 +1,34 @@
 # Directory Cleanup Summary
 
-## Latest Cleanup: July 28, 2025
+## Latest Cleanup: August 1, 2025
+
+### Overview
+Third major cleanup removing ~250+ temporary files accumulated during signal detection, TradingView integration, and option data collection work.
+
+### Files Deleted:
+- **Test Files**: 49 test_*.py scripts (all removed from root)
+- **Debug Files**: 11 debug_*.py scripts  
+- **Check Scripts**: 19 check_*.py files
+- **Verify Scripts**: 5 verify_*.py files
+- **Analyze Scripts**: 5 analyze_*.py files
+- **SQL Files**: 43 .sql files from root (kept migrations/ folder)
+- **Documentation**: 7 temporary .md files deleted, 2 moved to docs/
+- **Batch Files**: 11 unnecessary .bat files deleted
+- **Temporary Files**: session continuation files, nul file, duplicates
+- **Result Files**: 6 .txt result/output files
+- **Python Scripts**: ~20 miscellaneous scripts (download_*, signal_*, etc.)
+- **Directories Removed**: archive/, data_downloads/, tradingview_cache/, malformed directory
+- **Log Files**: Cleared logs/ directory
+
+**Total Files Deleted**: ~250+ files
+
+### Files Moved to docs/:
+- BACKTEST_CAPABILITIES.md
+- TRADINGVIEW_SETUP.md
+
+---
+
+## Previous Cleanup: July 28, 2025
 
 ### Overview
 Second major cleanup focusing on test and debug files accumulated during backtest development and fixes.

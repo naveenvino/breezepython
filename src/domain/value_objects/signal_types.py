@@ -235,9 +235,14 @@ class SignalResult:
         stop_loss: float,
         entry_time: datetime,
         entry_price: float,
+        direction: Optional[TradeDirection] = None,
         confidence: float = 0.8
     ):
         """Create signal result from signal type"""
+        # Use provided direction or infer from signal type
+        if direction is None:
+            direction = TradeDirection.BULLISH if signal_type.is_bullish else TradeDirection.BEARISH
+            
         return cls(
             is_triggered=True,
             signal_type=signal_type,
@@ -246,7 +251,7 @@ class SignalResult:
             # Bullish (PE): round down, Bearish (CE): round up
             strike_price=(int(stop_loss / 50) * 50) if signal_type.is_bullish else (int((stop_loss + 49) / 50) * 50),
             stop_loss=stop_loss,
-            direction=TradeDirection.BULLISH if signal_type.is_bullish else TradeDirection.BEARISH,
+            direction=direction,
             entry_time=entry_time,
             entry_price=entry_price,
             confidence=confidence,

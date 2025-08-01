@@ -18,9 +18,10 @@ class OptionPricingService:
     Service for option pricing and strike selection
     """
     
-    def __init__(self, data_collection_service: DataCollectionService, db_manager=None):
+    def __init__(self, data_collection_service: DataCollectionService, db_manager=None, lot_size: int = 75):
         self.data_collection = data_collection_service
         self.db_manager = db_manager  # Can be None, service will handle it
+        self.lot_size = lot_size  # Configurable lot size, default 75 for NIFTY
     
     def calculate_atm_strike(self, spot_price: float, strike_interval: int = 50) -> int:
         """
@@ -137,7 +138,7 @@ class OptionPricingService:
             pnl = quantity * (intrinsic_value - premium)
         
         # Subtract commission
-        lots = abs(quantity) // 50  # Assuming lot size of 50
+        lots = abs(quantity) // self.lot_size  # Use configured lot size
         total_commission = lots * commission * 2  # Entry and exit
         
         return pnl - total_commission
@@ -178,13 +179,17 @@ class OptionPricingService:
         strike: int,
         option_type: str,
         quantity: int,
-        lot_size: int = 50
+        lot_size: int = None
     ) -> float:
         """
         Calculate margin required for option position
         
         Simplified calculation - actual margin varies by broker
         """
+        # Use instance lot size if not provided
+        if lot_size is None:
+            lot_size = self.lot_size
+            
         # For option selling, approximate margin requirement
         if quantity < 0:  # Selling option
             # Roughly 15% of notional value

@@ -100,29 +100,62 @@ class OptionsHistoricalData(Base):
         from ....utils.market_hours import is_within_market_hours
         IST = pytz.timezone('Asia/Kolkata')
         
-        # Convert UTC to IST for storage
-        utc_timestamp = datetime.fromisoformat(breeze_data['datetime'].replace('Z', '+00:00'))
-        timestamp = utc_timestamp.astimezone(IST).replace(tzinfo=None)
+        # Parse datetime - handle multiple formats
+        datetime_str = breeze_data['datetime']
+        if 'T' in datetime_str or 'Z' in datetime_str:
+            # ISO format with timezone
+            utc_timestamp = datetime.fromisoformat(datetime_str.replace('Z', '+00:00'))
+            timestamp = utc_timestamp.astimezone(IST).replace(tzinfo=None)
+        elif ' ' in datetime_str:
+            # YYYY-MM-DD HH:MM:SS format from Breeze (already in IST)
+            timestamp = datetime.strptime(datetime_str, '%Y-%m-%d %H:%M:%S')
+        else:
+            # DD-MON-YYYY format from Breeze
+            timestamp = datetime.strptime(datetime_str, '%d-%b-%Y')
         
         # Filter out data outside market hours (9:15 AM - 3:30 PM IST)
-        if not is_within_market_hours(timestamp, include_pre_market=False):
+        # For Breeze 5-minute data, use is_breeze_data=True (regular hours 9:15-15:30)
+        if not is_within_market_hours(timestamp, include_pre_market=False, is_breeze_data=True, extended_hours=False):
             return None  # This record will be skipped
         
-        utc_expiry = datetime.fromisoformat(breeze_data['expiry_date'].replace('Z', '+00:00'))
-        expiry = utc_expiry.astimezone(IST).replace(tzinfo=None)
+        # Parse expiry date - handle both ISO format and DD-MON-YYYY format
+        expiry_str = breeze_data['expiry_date']
+        if 'T' in expiry_str or 'Z' in expiry_str:
+            # ISO format
+            utc_expiry = datetime.fromisoformat(expiry_str.replace('Z', '+00:00'))
+            expiry = utc_expiry.astimezone(IST).replace(tzinfo=None)
+        else:
+            # DD-MON-YYYY format from Breeze
+            expiry = datetime.strptime(expiry_str, '%d-%b-%Y')
         
         # Calculate bid-ask spread if both are available
         bid_ask_spread = None
         if breeze_data.get('best_bid_price') and breeze_data.get('best_offer_price'):
             bid_ask_spread = float(breeze_data['best_offer_price']) - float(breeze_data['best_bid_price'])
         
+        # Construct trading symbol from components if not provided
+        strike = int(breeze_data.get('strike_price', 0))
+        option_type = 'PE' if breeze_data.get('right', '').lower() == 'put' else 'CE'
+        
+        # If trading_symbol not in data, construct it
+        if 'trading_symbol' not in breeze_data:
+            # Format: NIFTY25JAN23300CE
+            month_map = {'JAN': 'JAN', 'FEB': 'FEB', 'MAR': 'MAR', 'APR': 'APR', 'MAY': 'MAY', 'JUN': 'JUN',
+                        'JUL': 'JUL', 'AUG': 'AUG', 'SEP': 'SEP', 'OCT': 'OCT', 'NOV': 'NOV', 'DEC': 'DEC'}
+            # Get month from expiry date
+            month = expiry.strftime('%b').upper()
+            year = expiry.strftime('%y')
+            trading_symbol = f"NIFTY{year}{month}{strike}{option_type}"
+        else:
+            trading_symbol = breeze_data['trading_symbol']
+        
         return cls(
-            trading_symbol=breeze_data.get('trading_symbol', breeze_data['stock_code']),
+            trading_symbol=trading_symbol,
             timestamp=timestamp,
             exchange=breeze_data.get('exchange_code', 'NFO'),
             underlying=breeze_data.get('underlying', 'NIFTY'),
-            strike=int(breeze_data.get('strike_price', 0)),
-            option_type=breeze_data.get('right', 'CE'),  # CE or PE
+            strike=strike,
+            option_type=option_type,
             expiry_date=expiry,
             open=float(breeze_data['open']),
             high=float(breeze_data['high']),

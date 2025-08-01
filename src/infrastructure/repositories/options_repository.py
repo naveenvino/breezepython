@@ -445,3 +445,161 @@ class OptionsHistoricalDataRepository(IOptionsHistoricalDataRepository):
             "open_interest": model.OpenInterest,
             "interval": model.Interval
         }
+    
+    async def get_option_prices_batch(
+        self,
+        timestamp: datetime,
+        options: List[Dict[str, Any]],
+        expiry_date: date
+    ) -> Dict[str, float]:
+        """
+        Batch fetch option prices for multiple strikes/types
+        Eliminates N+1 query problem
+        
+        Args:
+            timestamp: Time to get prices for
+            options: List of dicts with 'strike' and 'option_type' keys
+            expiry_date: Expiry date of options
+            
+        Returns:
+            Dict mapping "strike_type" to price (e.g., "25000_CE": 150.5)
+        """
+        try:
+            with self.SessionLocal() as session:
+                # Build OR conditions for all requested options
+                conditions = []
+                for opt in options:
+                    conditions.append(
+                        and_(
+                            OptionsHistoricalData.StrikePrice == opt["strike"],
+                            OptionsHistoricalData.OptionType == opt["option_type"]
+                        )
+                    )
+                
+                # Single query for all options
+                results = session.query(
+                    OptionsHistoricalData.StrikePrice,
+                    OptionsHistoricalData.OptionType,
+                    OptionsHistoricalData.Close,
+                    OptionsHistoricalData.BidPrice,
+                    OptionsHistoricalData.AskPrice
+                ).filter(
+                    and_(
+                        OptionsHistoricalData.Timestamp == timestamp,
+                        OptionsHistoricalData.ExpiryDate == expiry_date,
+                        or_(*conditions)
+                    )
+                ).all()
+                
+                # Build result dictionary
+                price_map = {}
+                for result in results:
+                    key = f"{int(result.StrikePrice)}_{result.OptionType}"
+                    
+                    # Use mid price if bid/ask available, otherwise use close
+                    if result.BidPrice and result.AskPrice:
+                        price = (result.BidPrice + result.AskPrice) / 2
+                    else:
+                        price = result.Close
+                        
+                    price_map[key] = float(price)
+                
+                # Log any missing prices
+                for opt in options:
+                    key = f"{opt['strike']}_{opt['option_type']}"
+                    if key not in price_map:
+                        logger.warning(f"No price found for {key} at {timestamp}")
+                
+                return price_map
+                
+        except Exception as e:
+            logger.error(f"Error in batch option price fetch: {e}")
+            return {}
+    
+    async def get_option_chain_batch(
+        self,
+        timestamp: datetime,
+        strikes: List[int],
+        expiry_date: date
+    ) -> Dict[int, Dict[str, float]]:
+        """
+        Get entire option chain for multiple strikes in one query
+        
+        Returns:
+            Dict mapping strike to {'CE': price, 'PE': price}
+        """
+        try:
+            with self.SessionLocal() as session:
+                # Get all CE and PE options for given strikes
+                results = session.query(
+                    OptionsHistoricalData.StrikePrice,
+                    OptionsHistoricalData.OptionType,
+                    OptionsHistoricalData.Close,
+                    OptionsHistoricalData.Volume,
+                    OptionsHistoricalData.OpenInterest
+                ).filter(
+                    and_(
+                        OptionsHistoricalData.Timestamp == timestamp,
+                        OptionsHistoricalData.ExpiryDate == expiry_date,
+                        OptionsHistoricalData.StrikePrice.in_(strikes)
+                    )
+                ).all()
+                
+                # Build result structure
+                chain = {strike: {} for strike in strikes}
+                
+                for result in results:
+                    strike = int(result.StrikePrice)
+                    option_type = result.OptionType
+                    
+                    if strike in chain:
+                        chain[strike][option_type] = {
+                            'price': float(result.Close),
+                            'volume': result.Volume,
+                            'oi': result.OpenInterest
+                        }
+                
+                return chain
+                
+        except Exception as e:
+            logger.error(f"Error in batch option chain fetch: {e}")
+            return {}
+    
+    async def get_historical_data_batch(
+        self,
+        symbols: List[str],
+        from_date: datetime,
+        to_date: datetime,
+        interval: str = "5minute"
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Get historical data for multiple symbols in one query
+        
+        Returns:
+            Dict mapping symbol to list of price records
+        """
+        try:
+            with self.SessionLocal() as session:
+                results = session.query(OptionsHistoricalData).filter(
+                    and_(
+                        OptionsHistoricalData.Symbol.in_(symbols),
+                        OptionsHistoricalData.Timestamp >= from_date,
+                        OptionsHistoricalData.Timestamp <= to_date,
+                        OptionsHistoricalData.Interval == interval
+                    )
+                ).order_by(
+                    OptionsHistoricalData.Symbol,
+                    OptionsHistoricalData.Timestamp
+                ).all()
+                
+                # Group results by symbol
+                data_by_symbol = {symbol: [] for symbol in symbols}
+                
+                for result in results:
+                    data_by_symbol[result.Symbol].append(self._model_to_dict(result))
+                
+                return data_by_symbol
+                
+        except Exception as e:
+            logger.error(f"Error in batch historical data fetch: {e}")
+            return {}
