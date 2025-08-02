@@ -16,6 +16,7 @@ from ...domain.services.risk_manager import RiskManager
 from ...domain.services.market_calendar import MarketCalendar
 from ...infrastructure.services.data_collection_service import DataCollectionService
 from ...infrastructure.services.option_pricing_service import OptionPricingService
+from ...infrastructure.services.holiday_service import HolidayService
 from ...infrastructure.validation.market_data_validator import MarketDataValidator
 from ...infrastructure.database.models import (
     BacktestRun, BacktestTrade, BacktestPosition, BacktestDailyResult,
@@ -71,6 +72,7 @@ class RunBacktestUseCase:
         self.option_pricing = option_pricing_service
         self.signal_evaluator = SignalEvaluator()
         self.context_manager = WeeklyContextManager()
+        self.holiday_service = HolidayService()
         self.db_manager = get_db_manager()
         self.enable_risk_management = enable_risk_management
         
@@ -248,6 +250,11 @@ class RunBacktestUseCase:
             
             # Skip non-market hours
             if not self.context_manager.is_market_hours(current_bar.timestamp):
+                continue
+                
+            # Skip holidays
+            if self.holiday_service.is_trading_holiday(current_bar.timestamp.date(), "NSE"):
+                logger.debug(f"Skipping {current_bar.timestamp.date()} - Trading holiday")
                 continue
                 
             # Validate NIFTY data if validator is enabled

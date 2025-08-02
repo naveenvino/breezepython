@@ -1,6 +1,42 @@
 # Directory Cleanup Summary
 
-## Latest Cleanup: August 1, 2025
+## Latest Cleanup: August 2, 2025
+
+### Overview
+Fourth cleanup focusing on removing accumulated test files and duplicate stored procedures after successful holiday integration and progressive SP implementation.
+
+### Files Deleted:
+- **Test Files**: ~25 test_*.py scripts from root directory
+- **Compare/Check Scripts**: 10 compare_*.py and check_*.py files
+- **Debug Files**: 5 debug_*.py scripts
+- **Stored Procedures**: 7 duplicate/old versions of holiday SPs
+- **Analysis Scripts**: 7 temporary analysis files (analyze_*, trace_*, verify_*)
+- **Old APIs**: unified_api_correct.py (redundant)
+- **Duplicate Services**: weekly_context_manager_fixed.py
+- **Empty Files**: nul file, malformed directory
+- **SQL Files**: test_progressive_minimal.sql
+
+**Total Files Deleted**: ~60 files
+
+### Retained Key Files:
+#### Stored Procedures (only 2 needed):
+- `sp_GetWeeklySignalInsights_WithHolidays_Final.sql` - Production SP
+- `sp_GetWeeklySignalInsights_WithHolidays_Progressive_Exact.sql` - With progress tracking
+
+#### Core APIs:
+- `src/api/main.py` - Primary API (Port 8000)
+- `api/data_collection_api.py` - Data collection (Port 8002)
+
+### Key Accomplishments Before Cleanup:
+- Successfully integrated holiday handling into stored procedures
+- Fixed SP complexity issues with simplified holiday logic
+- Created progressive SP that shows month-by-month results
+- Verified both SPs return identical results
+- Fixed all column name issues (StrikePrice → Strike)
+
+---
+
+## Previous Cleanup: August 1, 2025
 
 ### Overview
 Third major cleanup removing ~250+ temporary files accumulated during signal detection, TradingView integration, and option data collection work.

@@ -14,6 +14,7 @@ from .nifty_timeframe_models import (
     NiftyIndexData4Hour, NiftyIndexDataDaily, NiftyIndexDataWeekly,
     NiftyIndexDataMonthly, get_nifty_model_for_timeframe
 )
+from .trading_holidays import TradingHoliday
 
 __all__ = [
     'Trade',
@@ -32,5 +33,6 @@ __all__ = [
     'BacktestPosition',
     'BacktestDailyResult',
     'BacktestStatus',
-    'TradeOutcome'
+    'TradeOutcome',
+    'TradingHoliday'
 ]

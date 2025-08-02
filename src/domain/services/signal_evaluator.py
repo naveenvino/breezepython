@@ -62,14 +62,15 @@ class SignalEvaluator:
         logger.debug(f"Evaluating signals at {bar_close_time}: Bar #{len(weekly_bars)}, Bias={context.bias.bias.name}")
 
         # A list of evaluator methods to be called in order of signal priority (S1 > S2 > ...).
+        # Note: S5 is evaluated before S7 to match SP behavior
         evaluators = [
             (self._evaluate_s1, (is_second_bar, first_bar, completed_bar, context, bar_close_time)),
             (self._evaluate_s2, (is_second_bar, first_bar, completed_bar, context, bar_close_time)),
             (self._evaluate_s3, (is_second_bar, first_bar, completed_bar, weekly_bars, context, bar_close_time)),
             (self._evaluate_s4, (first_bar, completed_bar, weekly_bars, context, bar_close_time)),
             (self._evaluate_s5, (first_bar, completed_bar, context, bar_close_time)),
-            (self._evaluate_s6, (is_second_bar, first_bar, completed_bar, weekly_bars, context, bar_close_time)),
             (self._evaluate_s7, (completed_bar, weekly_bars, context, bar_close_time)),
+            (self._evaluate_s6, (is_second_bar, first_bar, completed_bar, weekly_bars, context, bar_close_time)),
             (self._evaluate_s8, (completed_bar, weekly_bars, context, bar_close_time))
         ]
 
